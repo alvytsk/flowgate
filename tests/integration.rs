@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use flowgate::context::{RequestContext, RouteParams};
 use flowgate::extract::json::Json;
+use flowgate::extract::path::Path;
+use flowgate::extract::query::Query;
 use flowgate::extract::state::State;
 use flowgate::extract::FromRef;
 use flowgate::response::IntoResponse;
@@ -217,6 +219,170 @@ fn json_rejection_into_response() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
+// --- Path extraction ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_single_string() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder().uri("/users/alice").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![("name".into(), "alice".into())]),
+        body_limit: 262_144,
+    });
+
+    let Path(name): Path<String> = Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(name, "alice");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_single_u64() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder().uri("/users/42").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![("id".into(), "42".into())]),
+        body_limit: 262_144,
+    });
+
+    let Path(id): Path<u64> = Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(id, 42);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_tuple() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder()
+        .uri("/users/7/posts/99")
+        .body(())
+        .unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![
+            ("uid".into(), "7".into()),
+            ("pid".into(), "99".into()),
+        ]),
+        body_limit: 262_144,
+    });
+
+    let Path((uid, pid)): Path<(u64, u64)> =
+        Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(uid, 7);
+    assert_eq!(pid, 99);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_struct() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    #[derive(Deserialize)]
+    struct Params {
+        user_id: u64,
+        slug: String,
+    }
+
+    let req = http::Request::builder()
+        .uri("/users/5/posts/hello-world")
+        .body(())
+        .unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![
+            ("user_id".into(), "5".into()),
+            ("slug".into(), "hello-world".into()),
+        ]),
+        body_limit: 262_144,
+    });
+
+    let Path(p): Path<Params> = Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(p.user_id, 5);
+    assert_eq!(p.slug, "hello-world");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_invalid_u64_returns_error() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder().uri("/users/abc").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![("id".into(), "abc".into())]),
+        body_limit: 262_144,
+    });
+
+    let result: Result<Path<u64>, _> = Path::from_request_parts(&mut parts, &()).await;
+    assert!(result.is_err());
+}
+
+// --- Query extraction ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_struct() {
+    use flowgate::extract::FromRequestParts;
+
+    #[derive(Deserialize)]
+    struct Search {
+        q: String,
+        page: u32,
+    }
+
+    let req = http::Request::builder()
+        .uri("/search?q=rust&page=2")
+        .body(())
+        .unwrap();
+    let (mut parts, _) = req.into_parts();
+
+    let Query(s): Query<Search> = Query::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(s.q, "rust");
+    assert_eq!(s.page, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_missing_returns_error() {
+    use flowgate::extract::FromRequestParts;
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct Required {
+        q: String,
+    }
+
+    let req = http::Request::builder().uri("/search").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+
+    let result: Result<Query<Required>, _> = Query::from_request_parts(&mut parts, &()).await;
+    assert!(result.is_err());
+}
+
+// --- Rejection types ---
+
+#[test]
+fn path_rejection_into_response() {
+    use flowgate::error::PathRejection;
+
+    let res = PathRejection::MissingRouteParams.into_response();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let res = PathRejection::DeserializeError("bad".into()).into_response();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn query_rejection_into_response() {
+    use flowgate::error::QueryRejection;
+
+    let res = QueryRejection::DeserializeError("bad".into()).into_response();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
 // --- Full server round-trip tests ---
 
 /// Helper: spin up a Flowgate server on a random port, return the address.
@@ -391,4 +557,91 @@ async fn round_trip_body_limit_enforced() {
     let big_payload = r#"{"data":"this string is definitely longer than thirty-two bytes"}"#;
     let (status, _) = http_request(addr, "POST", "/big", Some(big_payload)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_path_param() {
+    #[derive(Serialize)]
+    struct User {
+        id: u64,
+    }
+
+    async fn get_user(Path(id): Path<u64>) -> Json<User> {
+        Json(User { id })
+    }
+
+    let app = App::new().get("/users/{id}", get_user);
+    let addr = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "GET", "/users/42", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["id"], 42);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_path_param_invalid() {
+    async fn get_user(Path(_id): Path<u64>) -> &'static str {
+        "ok"
+    }
+
+    let app = App::new().get("/users/{id}", get_user);
+    let addr = serve_app(app).await;
+
+    let (status, _) = http_request(addr, "GET", "/users/not-a-number", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_path_and_json() {
+    #[derive(Deserialize)]
+    struct UpdateUser {
+        name: String,
+    }
+    #[derive(Serialize)]
+    struct Updated {
+        id: u64,
+        name: String,
+    }
+
+    async fn update_user(Path(id): Path<u64>, Json(body): Json<UpdateUser>) -> Json<Updated> {
+        Json(Updated {
+            id,
+            name: body.name,
+        })
+    }
+
+    let app = App::new().put("/users/{id}", update_user);
+    let addr = serve_app(app).await;
+
+    let (status, body) =
+        http_request(addr, "PUT", "/users/7", Some(r#"{"name":"alice"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["id"], 7);
+    assert_eq!(parsed["name"], "alice");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_query_params() {
+    #[derive(Deserialize)]
+    struct Search {
+        q: String,
+    }
+    #[derive(Serialize)]
+    struct Results {
+        query: String,
+    }
+
+    async fn search(Query(s): Query<Search>) -> Json<Results> {
+        Json(Results { query: s.q })
+    }
+
+    let app = App::new().get("/search", search);
+    let addr = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "GET", "/search?q=flowgate", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["query"], "flowgate");
 }

@@ -16,6 +16,8 @@ pub use body::{Request, Response};
 pub use config::ServerConfig;
 pub use context::{RequestContext, RouteParams};
 pub use extract::json::Json;
+pub use extract::path::Path;
+pub use extract::query::Query;
 pub use extract::state::State;
 pub use extract::FromRef;
 pub use handler::Handler;
