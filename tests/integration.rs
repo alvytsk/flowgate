@@ -146,7 +146,9 @@ fn request_context_clone() {
 #[test]
 fn server_config_defaults() {
     let config = ServerConfig::default();
-    assert_eq!(config.addr, "0.0.0.0:8080");
+    assert_eq!(config.host, "0.0.0.0");
+    assert_eq!(config.port, 8080);
+    assert_eq!(config.bind_addr(), "0.0.0.0:8080");
     assert_eq!(config.json_body_limit, 262_144);
     assert!(config.keep_alive);
     assert!(config.header_read_timeout.is_some());
@@ -164,7 +166,9 @@ fn server_config_builder() {
         .max_headers(None)
         .enable_default_tracing(false);
 
-    assert_eq!(config.addr, "127.0.0.1:3000");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 3000);
+    assert_eq!(config.bind_addr(), "127.0.0.1:3000");
     assert_eq!(config.json_body_limit, 1024);
     assert!(!config.keep_alive);
     assert!(config.header_read_timeout.is_none());

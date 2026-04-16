@@ -29,9 +29,10 @@ async fn hello() -> Json<Hello> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = App::new().get("/hello", hello);
-    flowgate::server::serve(app, ServerConfig::new()).await.unwrap();
+    flowgate::server::serve(app, ServerConfig::from_env()).await?;
+    Ok(())
 }
 ```
 
@@ -69,10 +70,11 @@ async fn handler(State(db): State<Arc<Db>>) -> &'static str {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState { db: Arc::new(Db {}) };
     let app = App::with_state(state).get("/", handler);
-    flowgate::server::serve(app, ServerConfig::new()).await.unwrap();
+    flowgate::server::serve(app, ServerConfig::from_env()).await?;
+    Ok(())
 }
 ```
 
@@ -108,22 +110,38 @@ Register with `.layer(Timing)` on the `App` builder. A built-in `TracingMiddlewa
 use std::time::Duration;
 use flowgate::ServerConfig;
 
+// Read HOST and PORT from environment, falling back to 0.0.0.0:8080:
+let config = ServerConfig::from_env();
+
+// Or configure explicitly:
 let config = ServerConfig::new()
-    .addr("0.0.0.0:3000")
+    .host("127.0.0.1")
+    .port(3000)
     .json_body_limit(128 * 1024)     // 128 KiB
     .keep_alive(true)
     .header_read_timeout(Some(Duration::from_secs(5)))
     .max_headers(Some(32));
+
+// .addr("host:port") is also supported for convenience:
+let config = ServerConfig::new().addr("127.0.0.1:3000");
 ```
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `addr` | `0.0.0.0:8080` | Bind address |
+| `host` | `0.0.0.0` | Bind host |
+| `port` | `8080` | Bind port |
 | `json_body_limit` | 256 KiB | Max JSON body size (413 on exceed) |
 | `keep_alive` | `true` | HTTP/1.1 keep-alive |
 | `header_read_timeout` | 5 s | `None` to disable |
 | `max_headers` | 64 | `None` for hyper default |
 | `enable_default_tracing` | `true` | Auto-init `tracing-subscriber` |
+
+`ServerConfig::from_env()` reads the following environment variables (unset or invalid values fall back to defaults):
+
+| Variable | Default | Maps to |
+|----------|---------|---------|
+| `HOST` | `0.0.0.0` | `host` |
+| `PORT` | `8080` | `port` |
 
 ## Feature Flags
 
@@ -142,6 +160,7 @@ cargo build --all-features         # Build with all feature flags
 cargo test                         # Run all integration tests
 cargo clippy --all-targets         # Lint (zero warnings required)
 cargo run --example hello          # Run the demo server on :8080
+PORT=3000 cargo run --example hello  # Override the port via env
 ```
 
 ## Project Structure

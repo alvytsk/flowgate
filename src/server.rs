@@ -46,8 +46,9 @@ pub async fn serve<S: Send + Sync + 'static>(
         body_limit: config.json_body_limit,
     });
 
-    let listener = TcpListener::bind(&config.addr).await?;
-    tracing::info!("listening on {}", config.addr);
+    let bind_addr = config.bind_addr();
+    let listener = TcpListener::bind(&bind_addr).await?;
+    tracing::info!("listening on {bind_addr}");
 
     // Build the hyper-util HTTP server builder with explicit config.
     let mut builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());

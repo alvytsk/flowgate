@@ -69,7 +69,7 @@ async fn echo(Json(body): Json<EchoRequest>) -> Json<EchoResponse> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         db: Arc::new(Db { healthy: true }),
         app_name: "flowgate-hello".to_owned(),
@@ -80,7 +80,8 @@ async fn main() {
         .get("/health", health)
         .post("/echo", echo);
 
-    let config = ServerConfig::new().addr("0.0.0.0:8080");
+    let config = ServerConfig::from_env();
 
-    flowgate::server::serve(app, config).await.unwrap();
+    flowgate::server::serve(app, config).await?;
+    Ok(())
 }
