@@ -9,7 +9,7 @@ Flowgate is a Rust web framework for embedded Linux systems. Single-crate design
 ## Documentation
 
 - **[README.md](README.md)** — project overview, quick start, usage examples, configuration reference
-- **[docs/architecture.md](docs/architecture.md)** — layer diagram, handler erasure, ownership model, dependency table
+- **[docs/architecture.md](docs/architecture.md)** — layer diagram, handler erasure, ownership model, dependency table. Always update it when architecture changes.
 
 ## Build & Test Commands
 

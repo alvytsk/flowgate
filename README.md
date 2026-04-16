@@ -1,20 +1,57 @@
-# Flowgate
+# ⚙️ Flowgate
 
-A Rust web framework for embedded Linux systems with FastAPI-inspired ergonomics.
+**Embedded-First • Zero Proc Macros • Compile-Time Safety**
 
-Built on [hyper 1.x](https://github.com/hyperium/hyper) and [tokio](https://tokio.rs), Flowgate targets constrained environments where memory footprint and compile-time safety matter. Single-crate, single-threaded by default, zero proc macros.
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.75+-DEA584?logo=rust)](https://www.rust-lang.org)
 
-## Quick Start
+*Flowgate is a web framework for embedded Linux, built for developers who need real-time control without runtime surprises. Powered by hyper 1.x and tokio, it delivers FastAPI-inspired ergonomics in a single-crate, single-threaded package with zero proc macros.*
 
-Add Flowgate to your `Cargo.toml`:
+---
+
+[Features](#-key-features) • [Quick Start](#-quick-start) • [Core Concepts](#-core-concepts) • [Configuration](#-server-configuration) • [Architecture](docs/architecture.md)
+
+---
+
+## 💎 Why Flowgate?
+
+In an ecosystem of heavyweight async frameworks, Flowgate is purpose-built for **constrained environments** where every kilobyte counts.
+
+| Feature | Flowgate | Axum | Actix-web | Rocket |
+| :--- | :---: | :---: | :---: | :---: |
+| **Single-Crate Design** | ✅ | ❌ | ❌ | ❌ |
+| **Zero Proc Macros** | ✅ | ✅ | ❌ | ❌ |
+| **Single-Threaded Default** | ✅ | ❌ | ❌ | ❌ |
+| **Compile-Time Extractor Safety** | ✅ | ✅ | ✅ | ✅ |
+| **Embedded-Safe Defaults** | ✅ | ❌ | ❌ | ❌ |
+| **Sub-State Projection** | ✅ | ✅ | ❌ | ❌ |
+
+> **"Flowgate is what happens when you bring FastAPI ergonomics to bare-metal Rust — without the macro magic."**
+
+---
+
+## ✨ Key Features
+
+- **⚙️ Embedded-First**: Single-threaded tokio runtime by default with configurable body limits, header caps, and keep-alive — tuned for resource-constrained Linux systems.
+- **🔒 Compile-Time Safety**: Handler arguments are validated at compile time via `FromRequest` / `FromRequestParts` traits. No runtime reflection, no proc macros.
+- **🧩 Handler Erasure**: Macro-generated impls for 0–8 extractor arguments bridge type-safe handlers to an object-safe `Endpoint` trait — clean generics, zero proc macros.
+- **📦 Single Crate**: One dependency in your `Cargo.toml`. No workspace sprawl, no adapter crates, no version matrix.
+- **🔗 Arc-Based Middleware**: Fully owned middleware chain with `Arc<dyn Middleware<S>>`. Cheap cloning across connections, uniform ownership throughout.
+- **🌲 Zero-Allocation Router**: Built on [matchit](https://github.com/ibraheemdev/matchit) — a radix trie with path parameters (`:id`, `*rest`) and zero heap allocations on match.
+
+---
+
+## 🏁 Quick Start
+
+### Installation
 
 ```toml
 [dependencies]
-flowgate = { path = "." }    # or from your registry
+flowgate = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 ```
 
-A minimal server:
+### The "Hello, Flowgate" Example
 
 ```rust
 use flowgate::{App, ServerConfig};
@@ -36,51 +73,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Features
+```bash
+cargo run --example hello
+# GET http://localhost:8080/hello → {"msg":"hello world"}
+```
 
-- **Type-safe extractors** -- handler arguments are extracted from the request at compile time. The last argument may consume the body (`FromRequest`); all preceding arguments use headers only (`FromRequestParts`).
-- **Shared application state** -- `App::with_state(S)` wraps state in `Arc` and makes it available to every handler via `State<T>`. Sub-state projection through `FromRef` keeps extraction cheap.
-- **Middleware chain** -- implement `Middleware<S>` to intercept requests. The chain is fully `Arc`-based for cheap cloning across connections.
-- **Configurable limits** -- body size, keep-alive, header read timeout, max headers -- all exposed through `ServerConfig` with embedded-safe defaults.
-- **matchit router** -- zero-allocation radix trie with path parameters (`:id`, `*rest`).
+---
 
-## Application State
+## 🛠 Core Concepts
+
+### 🧬 Type-Safe Extractors
+
+Handler arguments are extracted from the request automatically. The **last** argument may consume the body (`FromRequest`); all preceding arguments use headers only (`FromRequestParts`).
 
 ```rust
+use flowgate::extract::json::Json;
+use flowgate::extract::state::State;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+#[derive(Deserialize)]
+struct CreateUser { name: String }
+
+#[derive(Serialize)]
+struct User { id: u64, name: String }
+
+async fn create_user(
+    State(db): State<Arc<Db>>,   // FromRequestParts — headers only
+    Json(body): Json<CreateUser>, // FromRequest — consumes body (must be last)
+) -> Json<User> {
+    Json(User { id: 1, name: body.name })
+}
+```
+
+### 📡 Application State & Sub-State Projection
+
+Wrap shared state in `Arc` once. Extract fine-grained sub-state in handlers via `FromRef` — no cloning the entire state tree.
+
+```rust
 use flowgate::{App, ServerConfig};
 use flowgate::extract::state::State;
 use flowgate::extract::FromRef;
+use std::sync::Arc;
 
 #[derive(Clone)]
 struct AppState {
     db: Arc<Db>,
+    app_name: String,
 }
-
-struct Db { /* ... */ }
 
 impl FromRef<AppState> for Arc<Db> {
-    fn from_ref(state: &AppState) -> Self {
-        state.db.clone()
-    }
+    fn from_ref(state: &AppState) -> Self { state.db.clone() }
 }
 
-async fn handler(State(db): State<Arc<Db>>) -> &'static str {
+async fn health(
+    State(db): State<Arc<Db>>,
+    State(name): State<String>,
+) -> &'static str {
     "ok"
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState { db: Arc::new(Db {}) };
-    let app = App::with_state(state).get("/", handler);
-    flowgate::server::serve(app, ServerConfig::from_env()).await?;
-    Ok(())
 }
 ```
 
-`State<T>` implements both `FromRequest` and `FromRequestParts`, so it can appear in any handler argument position.
+### 🧱 Middleware
 
-## Middleware
+Implement the `Middleware<S>` trait to intercept requests. The chain is fully `Arc`-based — cheap to clone across connections.
 
 ```rust
 use std::sync::Arc;
@@ -104,16 +160,33 @@ impl<S: Send + Sync + 'static> Middleware<S> for Timing {
 
 Register with `.layer(Timing)` on the `App` builder. A built-in `TracingMiddleware` is included for structured request logging.
 
-## Server Configuration
+### 🛤 Routing
+
+```rust
+let app = App::with_state(state)
+    .layer(TracingMiddleware)
+    .get("/health", health)
+    .post("/users", create_user)
+    .get("/users/:id", get_user)
+    .get("/files/*path", serve_file);
+```
+
+Path parameters (`:id`) and catch-all segments (`*path`) are powered by the matchit radix trie.
+
+---
+
+## ⚡ Server Configuration
+
+Read from environment or configure explicitly — embedded-safe defaults out of the box.
 
 ```rust
 use std::time::Duration;
 use flowgate::ServerConfig;
 
-// Read HOST and PORT from environment, falling back to 0.0.0.0:8080:
+// From environment (reads HOST, PORT):
 let config = ServerConfig::from_env();
 
-// Or configure explicitly:
+// Or explicit:
 let config = ServerConfig::new()
     .host("127.0.0.1")
     .port(3000)
@@ -121,14 +194,11 @@ let config = ServerConfig::new()
     .keep_alive(true)
     .header_read_timeout(Some(Duration::from_secs(5)))
     .max_headers(Some(32));
-
-// .addr("host:port") is also supported for convenience:
-let config = ServerConfig::new().addr("127.0.0.1:3000");
 ```
 
 | Option | Default | Notes |
-|--------|---------|-------|
-| `host` | `0.0.0.0` | Bind host |
+| :--- | :---: | :--- |
+| `host` | `0.0.0.0` | Bind address |
 | `port` | `8080` | Bind port |
 | `json_body_limit` | 256 KiB | Max JSON body size (413 on exceed) |
 | `keep_alive` | `true` | HTTP/1.1 keep-alive |
@@ -136,34 +206,39 @@ let config = ServerConfig::new().addr("127.0.0.1:3000");
 | `max_headers` | 64 | `None` for hyper default |
 | `enable_default_tracing` | `true` | Auto-init `tracing-subscriber` |
 
-`ServerConfig::from_env()` reads the following environment variables (unset or invalid values fall back to defaults):
+**Environment variables** (`HOST`, `PORT`) override defaults when using `ServerConfig::from_env()`.
 
-| Variable | Default | Maps to |
-|----------|---------|---------|
-| `HOST` | `0.0.0.0` | `host` |
-| `PORT` | `8080` | `port` |
+---
 
-## Feature Flags
+## 🚩 Feature Flags
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `tracing-fmt` | yes | Sets up `tracing-subscriber` with env-filter |
-| `multi-thread` | no | Enables tokio multi-threaded runtime |
-| `ws` | no | WebSocket support (v0.2) |
-| `tls` | no | TLS via rustls (v0.2) |
+| :--- | :---: | :--- |
+| `tracing-fmt` | ✅ | Sets up `tracing-subscriber` with env-filter |
+| `multi-thread` | — | Enables tokio multi-threaded runtime |
+| `ws` | — | WebSocket support (v0.2) |
+| `tls` | — | TLS via rustls (v0.2) |
 
-## Building and Testing
+```bash
+cargo build --all-features         # Build with ws, tls, multi-thread
+```
+
+---
+
+## 🏗 Building & Testing
 
 ```bash
 cargo build                        # Build the library
-cargo build --all-features         # Build with all feature flags
-cargo test                         # Run all integration tests
+cargo test                         # Run all integration tests (22 tests)
 cargo clippy --all-targets         # Lint (zero warnings required)
-cargo run --example hello          # Run the demo server on :8080
-PORT=3000 cargo run --example hello  # Override the port via env
+cargo doc --no-deps --open         # Browse API docs
+cargo run --example hello          # Run demo server on :8080
+PORT=3000 cargo run --example hello  # Override port via env
 ```
 
-## Project Structure
+---
+
+## 📂 Project Structure
 
 ```
 src/
@@ -171,7 +246,7 @@ src/
   app.rs          App builder (state, routes, middleware)
   server.rs       TCP accept loop, hyper wiring
   router.rs       matchit radix trie, route matching
-  handler.rs      Handler trait + macro-generated impls (0-8 args)
+  handler.rs      Handler trait + macro-generated impls (0–8 args)
   middleware.rs    Middleware trait, Next chain, TracingMiddleware
   config.rs       ServerConfig with embedded-safe defaults
   body.rs         Request/Response type aliases
@@ -187,18 +262,24 @@ examples/
 tests/
   integration.rs  Round-trip HTTP tests
 docs/
-  architecture.md Detailed architecture document
+  architecture.md Layer diagram, handler erasure, ownership model
 ```
 
-## Documentation
+---
 
-- **[Architecture](docs/architecture.md)** -- layer diagram, handler erasure, ownership model, and design rationale
-- **`cargo doc --no-deps --open`** -- API reference from doc comments
+## 📖 Documentation
 
-## Minimum Supported Rust Version
+- **[Architecture](docs/architecture.md)** — layer diagram, handler erasure, ownership model, and design rationale
+- **`cargo doc --no-deps --open`** — API reference from doc comments
+
+---
+
+## 📋 Minimum Supported Rust Version
 
 Rust **1.75** (edition 2021).
 
-## License
+---
 
-MIT
+## 📄 License
+
+Flowgate is released under the **MIT License**. See [LICENSE](./LICENSE) for details.
