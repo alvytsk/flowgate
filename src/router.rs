@@ -5,6 +5,7 @@ use http::Method;
 
 use crate::body::Request;
 use crate::context::{RequestContext, RouteParams};
+use crate::error::RouteError;
 use crate::handler::{into_endpoint, Endpoint, Handler};
 
 /// HTTP method router backed by matchit radix tries.
@@ -20,7 +21,7 @@ impl<S: Send + Sync + 'static> Router<S> {
     }
 
     /// Register a handler for a method + path.
-    pub fn add<H, T>(&mut self, method: Method, path: &str, handler: H)
+    pub fn add<H, T>(&mut self, method: Method, path: &str, handler: H) -> Result<(), RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -30,7 +31,16 @@ impl<S: Send + Sync + 'static> Router<S> {
             .entry(method)
             .or_default()
             .insert(path, endpoint)
-            .expect("failed to insert route");
+            .map_err(|e| RouteError(e.to_string()))
+    }
+
+    /// Return HTTP methods that have a route matching the given path.
+    pub fn allowed_methods(&self, path: &str) -> Vec<Method> {
+        self.routes
+            .iter()
+            .filter(|(_, router)| router.at(path).is_ok())
+            .map(|(method, _)| method.clone())
+            .collect()
     }
 
     /// Match a request and return the endpoint + inject RequestContext into extensions.

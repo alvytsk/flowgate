@@ -96,6 +96,18 @@ impl IntoResponse for QueryRejection {
     }
 }
 
+/// Error returned when route registration fails (e.g., conflicting path patterns).
+#[derive(Debug)]
+pub struct RouteError(pub(crate) String);
+
+impl std::fmt::Display for RouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "route registration failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for RouteError {}
+
 /// Rejection returned when state extraction fails (infallible in practice).
 #[derive(Debug)]
 pub enum StateRejection {

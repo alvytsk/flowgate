@@ -77,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = App::with_state(state)
         .layer(TracingMiddleware)
-        .get("/health", health)
-        .post("/echo", echo);
+        .get("/health", health)?
+        .post("/echo", echo)?;
 
     let config = ServerConfig::from_env();
 

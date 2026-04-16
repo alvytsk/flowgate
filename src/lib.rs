@@ -14,6 +14,7 @@ pub mod server;
 pub use app::App;
 pub use body::{Request, Response};
 pub use config::ServerConfig;
+pub use error::RouteError;
 pub use context::{RequestContext, RouteParams};
 pub use extract::json::Json;
 pub use extract::path::Path;

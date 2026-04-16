@@ -115,10 +115,28 @@ async fn handle_request<S: Send + Sync + 'static>(
             next.run(req, inner.state.clone()).await
         }
         None => {
-            // 404 Not Found
-            let mut res = http::Response::new(Full::new(Bytes::from("not found")));
-            *res.status_mut() = http::StatusCode::NOT_FOUND;
-            res
+            let allowed = inner.router.allowed_methods(req.uri().path());
+            if allowed.is_empty() {
+                // 404 Not Found
+                let mut res = http::Response::new(Full::new(Bytes::from("not found")));
+                *res.status_mut() = http::StatusCode::NOT_FOUND;
+                res
+            } else {
+                // 405 Method Not Allowed
+                let allow_value = allowed
+                    .iter()
+                    .map(|m| m.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut res =
+                    http::Response::new(Full::new(Bytes::from("method not allowed")));
+                *res.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
+                res.headers_mut().insert(
+                    http::header::ALLOW,
+                    http::HeaderValue::from_str(&allow_value).unwrap(),
+                );
+                res
+            }
         }
     }
 }

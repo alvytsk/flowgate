@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use http::Method;
 
+use crate::error::RouteError;
 use crate::handler::Handler;
 use crate::middleware::Middleware;
 use crate::router::Router;
@@ -35,17 +36,17 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     /// Register a route with a specific HTTP method.
-    pub fn route<H, T>(mut self, method: Method, path: &str, handler: H) -> Self
+    pub fn route<H, T>(mut self, method: Method, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
     {
-        self.router.add(method, path, handler);
-        self
+        self.router.add(method, path, handler)?;
+        Ok(self)
     }
 
     /// Register a GET route.
-    pub fn get<H, T>(self, path: &str, handler: H) -> Self
+    pub fn get<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -54,7 +55,7 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     /// Register a POST route.
-    pub fn post<H, T>(self, path: &str, handler: H) -> Self
+    pub fn post<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -63,7 +64,7 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     /// Register a PUT route.
-    pub fn put<H, T>(self, path: &str, handler: H) -> Self
+    pub fn put<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -72,7 +73,7 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     /// Register a DELETE route.
-    pub fn delete<H, T>(self, path: &str, handler: H) -> Self
+    pub fn delete<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
