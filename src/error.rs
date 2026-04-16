@@ -43,6 +43,71 @@ impl IntoResponse for JsonRejection {
     }
 }
 
+/// Rejection returned when path parameter extraction fails.
+#[derive(Debug)]
+pub enum PathRejection {
+    /// No route parameters available (handler called outside router context).
+    MissingRouteParams,
+    /// Failed to deserialize path parameters into the target type.
+    DeserializeError(String),
+}
+
+impl std::fmt::Display for PathRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRouteParams => write!(f, "no route parameters found"),
+            Self::DeserializeError(msg) => write!(f, "invalid path parameters: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for PathRejection {}
+
+impl IntoResponse for PathRejection {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Self::MissingRouteParams => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::DeserializeError(_) => StatusCode::BAD_REQUEST,
+        };
+        (status, self.to_string()).into_response()
+    }
+}
+
+/// Rejection returned when query parameter extraction fails.
+#[derive(Debug)]
+pub enum QueryRejection {
+    /// Failed to deserialize query parameters into the target type.
+    DeserializeError(String),
+}
+
+impl std::fmt::Display for QueryRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeserializeError(msg) => write!(f, "invalid query parameters: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for QueryRejection {}
+
+impl IntoResponse for QueryRejection {
+    fn into_response(self) -> Response {
+        (StatusCode::BAD_REQUEST, self.to_string()).into_response()
+    }
+}
+
+/// Error returned when route registration fails (e.g., conflicting path patterns).
+#[derive(Debug)]
+pub struct RouteError(pub(crate) String);
+
+impl std::fmt::Display for RouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "route registration failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for RouteError {}
+
 /// Rejection returned when state extraction fails (infallible in practice).
 #[derive(Debug)]
 pub enum StateRejection {

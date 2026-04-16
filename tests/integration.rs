@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use flowgate::context::{RequestContext, RouteParams};
 use flowgate::extract::json::Json;
+use flowgate::extract::path::Path;
+use flowgate::extract::query::Query;
 use flowgate::extract::state::State;
 use flowgate::extract::FromRef;
 use flowgate::response::IntoResponse;
@@ -217,6 +219,170 @@ fn json_rejection_into_response() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
+// --- Path extraction ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_single_string() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder().uri("/users/alice").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![("name".into(), "alice".into())]),
+        body_limit: 262_144,
+    });
+
+    let Path(name): Path<String> = Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(name, "alice");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_single_u64() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder().uri("/users/42").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![("id".into(), "42".into())]),
+        body_limit: 262_144,
+    });
+
+    let Path(id): Path<u64> = Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(id, 42);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_tuple() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder()
+        .uri("/users/7/posts/99")
+        .body(())
+        .unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![
+            ("uid".into(), "7".into()),
+            ("pid".into(), "99".into()),
+        ]),
+        body_limit: 262_144,
+    });
+
+    let Path((uid, pid)): Path<(u64, u64)> =
+        Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(uid, 7);
+    assert_eq!(pid, 99);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_struct() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    #[derive(Deserialize)]
+    struct Params {
+        user_id: u64,
+        slug: String,
+    }
+
+    let req = http::Request::builder()
+        .uri("/users/5/posts/hello-world")
+        .body(())
+        .unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![
+            ("user_id".into(), "5".into()),
+            ("slug".into(), "hello-world".into()),
+        ]),
+        body_limit: 262_144,
+    });
+
+    let Path(p): Path<Params> = Path::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(p.user_id, 5);
+    assert_eq!(p.slug, "hello-world");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn path_invalid_u64_returns_error() {
+    use flowgate::context::{RequestContext, RouteParams};
+    use flowgate::extract::FromRequestParts;
+
+    let req = http::Request::builder().uri("/users/abc").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+    parts.extensions.insert(RequestContext {
+        route_params: RouteParams(vec![("id".into(), "abc".into())]),
+        body_limit: 262_144,
+    });
+
+    let result: Result<Path<u64>, _> = Path::from_request_parts(&mut parts, &()).await;
+    assert!(result.is_err());
+}
+
+// --- Query extraction ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_struct() {
+    use flowgate::extract::FromRequestParts;
+
+    #[derive(Deserialize)]
+    struct Search {
+        q: String,
+        page: u32,
+    }
+
+    let req = http::Request::builder()
+        .uri("/search?q=rust&page=2")
+        .body(())
+        .unwrap();
+    let (mut parts, _) = req.into_parts();
+
+    let Query(s): Query<Search> = Query::from_request_parts(&mut parts, &()).await.unwrap();
+    assert_eq!(s.q, "rust");
+    assert_eq!(s.page, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_missing_returns_error() {
+    use flowgate::extract::FromRequestParts;
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct Required {
+        q: String,
+    }
+
+    let req = http::Request::builder().uri("/search").body(()).unwrap();
+    let (mut parts, _) = req.into_parts();
+
+    let result: Result<Query<Required>, _> = Query::from_request_parts(&mut parts, &()).await;
+    assert!(result.is_err());
+}
+
+// --- Rejection types ---
+
+#[test]
+fn path_rejection_into_response() {
+    use flowgate::error::PathRejection;
+
+    let res = PathRejection::MissingRouteParams.into_response();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let res = PathRejection::DeserializeError("bad".into()).into_response();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn query_rejection_into_response() {
+    use flowgate::error::QueryRejection;
+
+    let res = QueryRejection::DeserializeError("bad".into()).into_response();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
 // --- Full server round-trip tests ---
 
 /// Helper: spin up a Flowgate server on a random port, return the address.
@@ -224,20 +390,14 @@ async fn serve_app<S: Send + Sync + 'static>(app: App<S>) -> std::net::SocketAdd
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let config = ServerConfig::new()
-        .addr(addr.to_string())
-        .enable_default_tracing(false);
-
-    // We can't reuse the listener with `serve`, so re-bind inside `serve`.
-    // Drop our listener and let `serve` bind to the same address.
-    drop(listener);
+    let config = ServerConfig::new().enable_default_tracing(false);
 
     tokio::spawn(async move {
-        flowgate::server::serve(app, config).await.unwrap();
+        flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
     });
 
-    // Give the server a moment to bind.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     addr
 }
 
@@ -287,7 +447,7 @@ async fn round_trip_get_handler() {
         Json(Pong { ok: true })
     }
 
-    let app = App::new().get("/ping", ping);
+    let app = App::new().get("/ping", ping).unwrap();
     let addr = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/ping", None).await;
@@ -313,7 +473,7 @@ async fn round_trip_post_json() {
         })
     }
 
-    let app = App::new().post("/double", double);
+    let app = App::new().post("/double", double).unwrap();
     let addr = serve_app(app).await;
 
     let (status, body) = http_request(addr, "POST", "/double", Some(r#"{"x":21}"#)).await;
@@ -349,7 +509,7 @@ async fn round_trip_state_extraction() {
         })
     }
 
-    let app = App::with_state(Counter { value: 99 }).get("/count", get_count);
+    let app = App::with_state(Counter { value: 99 }).get("/count", get_count).unwrap();
     let addr = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/count", None).await;
@@ -370,25 +530,304 @@ async fn round_trip_body_limit_enforced() {
         "ok"
     }
 
-    let app = App::new().post("/big", accept_big);
+    let app = App::new().post("/big", accept_big).unwrap();
 
     // Use a tiny body limit
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener);
 
     let config = ServerConfig::new()
-        .addr(addr.to_string())
         .json_body_limit(32) // 32 bytes
         .enable_default_tracing(false);
 
     tokio::spawn(async move {
-        flowgate::server::serve(app, config).await.unwrap();
+        flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Send a body larger than 32 bytes
     let big_payload = r#"{"data":"this string is definitely longer than thirty-two bytes"}"#;
     let (status, _) = http_request(addr, "POST", "/big", Some(big_payload)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_path_param() {
+    #[derive(Serialize)]
+    struct User {
+        id: u64,
+    }
+
+    async fn get_user(Path(id): Path<u64>) -> Json<User> {
+        Json(User { id })
+    }
+
+    let app = App::new().get("/users/{id}", get_user).unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "GET", "/users/42", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["id"], 42);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_path_param_invalid() {
+    async fn get_user(Path(_id): Path<u64>) -> &'static str {
+        "ok"
+    }
+
+    let app = App::new().get("/users/{id}", get_user).unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, _) = http_request(addr, "GET", "/users/not-a-number", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_path_and_json() {
+    #[derive(Deserialize)]
+    struct UpdateUser {
+        name: String,
+    }
+    #[derive(Serialize)]
+    struct Updated {
+        id: u64,
+        name: String,
+    }
+
+    async fn update_user(Path(id): Path<u64>, Json(body): Json<UpdateUser>) -> Json<Updated> {
+        Json(Updated {
+            id,
+            name: body.name,
+        })
+    }
+
+    let app = App::new().put("/users/{id}", update_user).unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, body) =
+        http_request(addr, "PUT", "/users/7", Some(r#"{"name":"alice"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["id"], 7);
+    assert_eq!(parsed["name"], "alice");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_query_params() {
+    #[derive(Deserialize)]
+    struct Search {
+        q: String,
+    }
+    #[derive(Serialize)]
+    struct Results {
+        query: String,
+    }
+
+    async fn search(Query(s): Query<Search>) -> Json<Results> {
+        Json(Results { query: s.q })
+    }
+
+    let app = App::new().get("/search", search).unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "GET", "/search?q=flowgate", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["query"], "flowgate");
+}
+
+// --- Route registration errors ---
+
+#[test]
+fn route_conflict_returns_error() {
+    async fn handler_a() -> &'static str {
+        "a"
+    }
+    async fn handler_b() -> &'static str {
+        "b"
+    }
+
+    let result = App::new()
+        .get("/items/{id}", handler_a)
+        .unwrap()
+        .get("/items/{name}", handler_b);
+
+    let err = result.err().expect("expected route conflict error");
+    assert!(err.to_string().contains("route registration failed"));
+}
+
+// --- 405 Method Not Allowed ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_405_method_not_allowed() {
+    async fn get_only() -> &'static str {
+        "ok"
+    }
+
+    let app = App::new().get("/resource", get_only).unwrap();
+    let addr = serve_app(app).await;
+
+    // POST to a GET-only route
+    let (status, body) = http_request(addr, "POST", "/resource", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body, "method not allowed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_405_allow_header() {
+    async fn handler() -> &'static str {
+        "ok"
+    }
+
+    let app = App::new()
+        .get("/item", handler)
+        .unwrap()
+        .put("/item", handler)
+        .unwrap();
+    let addr = serve_app(app).await;
+
+    // DELETE to a route that only has GET + PUT
+    let (status, _) = http_request(addr, "DELETE", "/item", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_404_still_works() {
+    async fn handler() -> &'static str {
+        "ok"
+    }
+
+    let app = App::new().get("/exists", handler).unwrap();
+    let addr = serve_app(app).await;
+
+    // Path that matches no route at all
+    let (status, _) = http_request(addr, "GET", "/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// --- Middleware ordering and short-circuit ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_middleware_ordering() {
+    use std::sync::Mutex;
+    use flowgate::handler::BoxFuture;
+    use flowgate::middleware::{Middleware, Next};
+
+    #[derive(Clone)]
+    struct Order(std::sync::Arc<Mutex<Vec<&'static str>>>);
+
+    struct TagMiddleware(&'static str);
+    impl Middleware<Order> for TagMiddleware {
+        fn call(
+            &self,
+            req: flowgate::Request,
+            state: std::sync::Arc<Order>,
+            next: Next<Order>,
+        ) -> BoxFuture {
+            let tag = self.0;
+            Box::pin(async move {
+                state.0.lock().unwrap().push(tag);
+                next.run(req, state).await
+            })
+        }
+    }
+
+    let order = Order(std::sync::Arc::new(Mutex::new(Vec::new())));
+
+    async fn handler(State(order): State<Order>) -> &'static str {
+        order.0.lock().unwrap().push("handler");
+        "ok"
+    }
+
+    let app = App::with_state(order.clone())
+        .layer(TagMiddleware("first"))
+        .layer(TagMiddleware("second"))
+        .get("/test", handler)
+        .unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, _) = http_request(addr, "GET", "/test", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let log = order.0.lock().unwrap();
+    assert_eq!(*log, vec!["first", "second", "handler"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_middleware_short_circuit() {
+    use flowgate::handler::BoxFuture;
+    use flowgate::middleware::{Middleware, Next};
+
+    struct BlockMiddleware;
+    impl<S: Send + Sync + 'static> Middleware<S> for BlockMiddleware {
+        fn call(
+            &self,
+            _req: flowgate::Request,
+            _state: std::sync::Arc<S>,
+            _next: Next<S>,
+        ) -> BoxFuture {
+            Box::pin(async {
+                let mut res = http::Response::new(
+                    http_body_util::Full::new(bytes::Bytes::from("blocked")),
+                );
+                *res.status_mut() = StatusCode::FORBIDDEN;
+                res
+            })
+        }
+    }
+
+    async fn handler() -> &'static str {
+        "should not reach"
+    }
+
+    let app = App::new()
+        .layer(BlockMiddleware)
+        .get("/guarded", handler)
+        .unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "GET", "/guarded", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body, "blocked");
+}
+
+// --- Multi-extractor handler (3 args: State + Path + Json) ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_three_extractors() {
+    #[derive(Clone)]
+    struct Prefix(String);
+
+    #[derive(Deserialize)]
+    struct Body {
+        value: String,
+    }
+    #[derive(Serialize)]
+    struct Resp {
+        result: String,
+    }
+
+    async fn handler(
+        State(prefix): State<Prefix>,
+        Path(id): Path<u64>,
+        Json(body): Json<Body>,
+    ) -> Json<Resp> {
+        Json(Resp {
+            result: format!("{}-{}-{}", prefix.0, id, body.value),
+        })
+    }
+
+    let app = App::with_state(Prefix("pfx".into()))
+        .post("/items/{id}", handler)
+        .unwrap();
+    let addr = serve_app(app).await;
+
+    let (status, body) =
+        http_request(addr, "POST", "/items/5", Some(r#"{"value":"hello"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["result"], "pfx-5-hello");
 }

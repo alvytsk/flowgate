@@ -3,9 +3,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
+use hyper::server::conn::http1::Builder as Http1Builder;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use tokio::net::TcpListener;
 
 use crate::app::App;
@@ -22,10 +22,22 @@ struct ServerInner<S> {
     body_limit: usize,
 }
 
-/// Run the HTTP server with the given application and configuration.
+/// Run the HTTP server, binding to the address in `config`.
 pub async fn serve<S: Send + Sync + 'static>(
     app: App<S>,
     config: ServerConfig,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(config.bind_addr()).await?;
+    serve_with_listener(app, config, listener).await
+}
+
+/// Run the HTTP server on a pre-bound `TcpListener`.
+///
+/// Useful for tests that need to bind a random port without a race window.
+pub async fn serve_with_listener<S: Send + Sync + 'static>(
+    app: App<S>,
+    config: ServerConfig,
+    listener: TcpListener,
 ) -> std::io::Result<()> {
     #[cfg(feature = "tracing-fmt")]
     if config.enable_default_tracing {
@@ -34,7 +46,8 @@ pub async fn serve<S: Send + Sync + 'static>(
             .with_env_filter(
                 EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )
-            .init();
+            .try_init()
+            .ok();
     }
 
     let (state, router, middleware) = app.into_parts();
@@ -46,28 +59,32 @@ pub async fn serve<S: Send + Sync + 'static>(
         body_limit: config.json_body_limit,
     });
 
-    let bind_addr = config.bind_addr();
-    let listener = TcpListener::bind(&bind_addr).await?;
-    tracing::info!("listening on {bind_addr}");
+    let addr = listener.local_addr()?;
+    tracing::info!("listening on {addr}");
 
-    // Build the hyper-util HTTP server builder with explicit config.
-    let mut builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+    // Explicit HTTP/1-only builder — matches the embedded-first, HTTP/1-only plan.
+    let mut builder = Http1Builder::new();
+    builder.keep_alive(config.keep_alive);
 
     // Wire TokioTimer unconditionally — required for any timeout support.
-    builder.http1().timer(TokioTimer::new());
-
-    builder.http1().keep_alive(config.keep_alive);
+    builder.timer(TokioTimer::new());
 
     if let Some(timeout) = config.header_read_timeout {
-        builder.http1().header_read_timeout(timeout);
+        builder.header_read_timeout(timeout);
     }
 
     if let Some(max) = config.max_headers {
-        builder.http1().max_headers(max);
+        builder.max_headers(max);
     }
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::error!("accept error: {e}");
+                continue;
+            }
+        };
         let inner = inner.clone();
         let builder = builder.clone();
 
@@ -83,7 +100,7 @@ pub async fn serve<S: Send + Sync + 'static>(
             });
 
             if let Err(err) = builder.serve_connection(io, service).await {
-                tracing::warn!("connection error from {addr}: {err}");
+                tracing::warn!("connection error from {peer_addr}: {err}");
             }
         });
     }
@@ -108,10 +125,28 @@ async fn handle_request<S: Send + Sync + 'static>(
             next.run(req, inner.state.clone()).await
         }
         None => {
-            // 404 Not Found
-            let mut res = http::Response::new(Full::new(Bytes::from("not found")));
-            *res.status_mut() = http::StatusCode::NOT_FOUND;
-            res
+            let allowed = inner.router.allowed_methods(req.uri().path());
+            if allowed.is_empty() {
+                // 404 Not Found
+                let mut res = http::Response::new(Full::new(Bytes::from("not found")));
+                *res.status_mut() = http::StatusCode::NOT_FOUND;
+                res
+            } else {
+                // 405 Method Not Allowed
+                let allow_value = allowed
+                    .iter()
+                    .map(|m| m.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut res =
+                    http::Response::new(Full::new(Bytes::from("method not allowed")));
+                *res.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
+                res.headers_mut().insert(
+                    http::header::ALLOW,
+                    http::HeaderValue::from_str(&allow_value).unwrap(),
+                );
+                res
+            }
         }
     }
 }
