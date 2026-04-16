@@ -8,14 +8,16 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 
 ```
 ┌─────────────────────────────────┐
-│         Application             │  app.rs, config.rs
-│   (App builder, state, config)  │
+│         Application             │  app.rs, config.rs, group.rs
+│  (App builder, groups, config)  │
 ├─────────────────────────────────┤
-│          Middleware              │  middleware.rs
-│   (TracingMiddleware, custom)    │
+│          Middleware              │  middleware/
+│  Pre-routing: RequestId, custom │
+│  Post-routing: Tracing, Timeout │
 ├─────────────────────────────────┤
 │      Extraction / Response      │  extract/*, response.rs
-│  (Json, Path, Query, State)     │
+│  (Json, Path, Query, State,     │
+│   RequestId)                    │
 ├─────────────────────────────────┤
 │           Routing               │  router.rs
 │   (matchit radix trie, params)  │
@@ -25,10 +27,23 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 ├─────────────────────────────────┤
 │        Infrastructure           │  error.rs, context.rs
 │  (Rejections, RequestContext)   │
+├─────────────────────────────────┤
+│         OpenAPI (optional)      │  openapi/ (feature-gated)
+│  (OperationMeta, spec, docs UI) │
 └─────────────────────────────────┘
 ```
 
 ## Key Design Decisions
+
+### Builder/Runtime Split with Finalization
+
+The most important structural decision is the **builder-time / runtime split**.
+
+- **Builder time** (`App<S>`): Routes, groups, middleware, and metadata are accumulated raw. Builder method order does not affect semantics — `.layer()` added after `.get()` still applies to all routes.
+- **Finalization** (called internally by `serve()`): Flattens groups, merges app middleware into each route's middleware chain, builds the matchit router, produces the route manifest, and generates the OpenAPI spec if enabled.
+- **Runtime** (`RuntimeInner<S>`): Frozen, optimized state shared across all connections. No more structural changes after finalization.
+
+This eliminates "must call last" API rules and makes the builder order-insensitive.
 
 ### Handler Erasure: Two-Layer Design
 
@@ -40,23 +55,36 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 
 - `Arc<S>` throughout the erased/middleware layer (Endpoint, Middleware, Next)
 - `&S` for extractors — the Handler impl dereferences `&*state` before calling extractors
-- `Arc<[Arc<dyn Middleware<S>>]>` for the middleware chain — cheaply cloneable
+- `Arc<[Arc<dyn Middleware<S>>]>` for middleware chains — cheaply cloneable
+
+### Route Groups
+
+Groups carry a path prefix, middleware, and tags. They nest arbitrarily and are flattened at finalization:
+
+- Path prefixes are concatenated with a shared `normalize_group_path()` routine
+- Middleware stacks merge: parent group → child group → route-local
+- Tags are inherited: parent → child → route
+- App-level middleware is merged last at finalization (order-insensitive)
+
+### Pre-routing vs Post-routing Middleware
+
+- **`PreMiddleware<S>`** — runs before route matching. No access to route params. Uses `PreNext<S>` chain with a dispatch closure compiled once at startup.
+- **`Middleware<S>`** — runs after route matching. Has access to `RequestContext` with route params and body limit. Uses `Next<S>` chain walking to the endpoint.
+
+The dispatch closure is `Arc<dyn Fn(Request, Arc<S>) -> BoxFuture>`, built once during finalization. Pre-middleware does not allocate per request.
 
 ### Extractor Design
 
 - `FromRequestParts<S>` — extracts from headers/metadata without consuming the body
 - `FromRequest<S>` — extracts from the full request (may consume the body)
 - Handler macro: last argument uses `FromRequest`, all preceding use `FromRequestParts`
-- `State<T>` implements both traits so it can appear in any argument position
-- `Path<T>` — deserializes route parameters via custom serde Deserializer; supports single values, tuples, and structs
-- `Query<T>` — deserializes query string parameters via `serde_urlencoded`
-- `Path<T>`, `Query<T>`, and `State<T>` all implement both traits so they work in any handler position
+- `State<T>`, `Path<T>`, `Query<T>`, `RequestId` implement both traits for any-position use
 
 ### Sub-State Extraction
 
 `FromRef<S>` trait projects sub-state from the application state:
 - `State<AppState>` works via identity impl (`AppState: Clone`)
-- `State<Arc<Db>>` works via user-implemented `FromRef<AppState> for Arc<Db>` (cheap Arc clone)
+- `State<Arc<Db>>` works via user-implemented `FromRef<AppState> for Arc<Db>`
 
 ### Body Size Limits
 
@@ -71,6 +99,13 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 - Timer is wired unconditionally to prevent runtime panics
 - Explicit knobs for keep-alive, header read timeout, max headers
 
+### OpenAPI (feature-gated)
+
+- Route metadata is **manual** via `OperationMeta` builders
+- Schemas are **manual** via `SchemaObject` — no automatic Rust type introspection
+- `.with_openapi()` is a declarative toggle; finalization generates the spec and injects `/openapi.json` and `/docs` routes
+- When `openapi` feature is off, `OperationMeta` is a zero-size stub with no-op builders — user code compiles identically
+
 ## Dependencies
 
 | Crate | Purpose |
@@ -83,3 +118,4 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 | serde_urlencoded | Query string deserialization |
 | tracing | Structured logging |
 | http, http-body, http-body-util | HTTP types and body utilities |
+| futures-util (optional) | `catch_unwind` for RecoverMiddleware (`recover` feature) |

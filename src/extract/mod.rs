@@ -1,6 +1,7 @@
 pub mod json;
 pub mod path;
 pub mod query;
+pub mod request_id;
 pub mod state;
 
 use std::future::Future;

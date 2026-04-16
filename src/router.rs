@@ -6,11 +6,24 @@ use http::Method;
 use crate::body::Request;
 use crate::context::{RequestContext, RouteParams};
 use crate::error::RouteError;
-use crate::handler::{into_endpoint, Endpoint, Handler};
+use crate::handler::Endpoint;
+use crate::middleware::Middleware;
+
+/// Runtime route entry — fully resolved endpoint + merged middleware chain.
+///
+/// Produced during app finalization. The middleware chain is pre-merged
+/// (app middleware ++ route-local middleware) so dispatch is a single walk.
+pub(crate) struct CompiledRoute<S> {
+    pub endpoint: Arc<dyn Endpoint<S>>,
+    pub middleware: Arc<[Arc<dyn Middleware<S>>]>,
+}
 
 /// HTTP method router backed by matchit radix tries.
+///
+/// Holds compiled (finalized) routes. Insertion happens during app finalization,
+/// not during builder-time route registration.
 pub(crate) struct Router<S> {
-    routes: HashMap<Method, matchit::Router<Arc<dyn Endpoint<S>>>>,
+    routes: HashMap<Method, matchit::Router<Arc<CompiledRoute<S>>>>,
 }
 
 impl<S: Send + Sync + 'static> Router<S> {
@@ -20,17 +33,17 @@ impl<S: Send + Sync + 'static> Router<S> {
         }
     }
 
-    /// Register a handler for a method + path.
-    pub fn add<H, T>(&mut self, method: Method, path: &str, handler: H) -> Result<(), RouteError>
-    where
-        H: Handler<T, S> + Send + Sync + 'static,
-        T: Send + 'static,
-    {
-        let endpoint = into_endpoint(handler);
+    /// Insert a compiled route for a method + path.
+    pub fn insert(
+        &mut self,
+        method: Method,
+        path: &str,
+        route: Arc<CompiledRoute<S>>,
+    ) -> Result<(), RouteError> {
         self.routes
             .entry(method)
             .or_default()
-            .insert(path, endpoint)
+            .insert(path, route)
             .map_err(|e| RouteError(e.to_string()))
     }
 
@@ -43,12 +56,12 @@ impl<S: Send + Sync + 'static> Router<S> {
             .collect()
     }
 
-    /// Match a request and return the endpoint + inject RequestContext into extensions.
+    /// Match a request and return the compiled route + inject RequestContext.
     pub fn match_route(
         &self,
         req: &mut Request,
         body_limit: usize,
-    ) -> Option<Arc<dyn Endpoint<S>>> {
+    ) -> Option<Arc<CompiledRoute<S>>> {
         let method = req.method().clone();
         let path = req.uri().path().to_owned();
 

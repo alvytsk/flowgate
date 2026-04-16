@@ -11,14 +11,18 @@ use tokio::net::TcpListener;
 use crate::app::App;
 use crate::body::Request;
 use crate::config::ServerConfig;
-use crate::middleware::{Middleware, Next};
+use crate::handler::BoxFuture;
+use crate::middleware::{Next, PreMiddleware, PreNext};
 use crate::router::Router;
 
-/// Shared server state passed into each connection's service function.
-struct ServerInner<S> {
+/// Frozen runtime state shared across all connections.
+struct RuntimeInner<S> {
     state: Arc<S>,
-    router: Router<S>,
-    middleware: Arc<[Arc<dyn Middleware<S>>]>,
+    router: Arc<Router<S>>,
+    pre_middleware: Arc<[Arc<dyn PreMiddleware<S>>]>,
+    /// Pre-compiled dispatch closure: routing + post-routing middleware + endpoint.
+    /// Built once at startup so PreNext doesn't allocate a new closure per request.
+    dispatch_fn: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync>,
     body_limit: usize,
 }
 
@@ -50,17 +54,48 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
             .ok();
     }
 
-    let (state, router, middleware) = app.into_parts();
+    // Finalize: flatten groups, merge middleware, build matchit router.
+    let finalized = app
+        .finalize(config.json_body_limit)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
-    let inner = Arc::new(ServerInner {
-        state,
+    // Build the dispatch closure once — captures router, body_limit, state.
+    // PreNext uses this to call into routing after pre-middleware completes.
+    let router = finalized.router;
+    let body_limit = finalized.body_limit;
+    // We need to share the router across the dispatch closure and RuntimeInner.
+    // Wrap it in an Arc so both can hold a reference.
+    let router = Arc::new(router);
+    let router_for_dispatch = router.clone();
+
+    let dispatch_fn: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync> =
+        Arc::new(move |req, state| {
+            let router = router_for_dispatch.clone();
+            Box::pin(async move { dispatch_request(&router, body_limit, req, state).await })
+        });
+
+    let inner = Arc::new(RuntimeInner {
+        state: finalized.state,
         router,
-        middleware,
-        body_limit: config.json_body_limit,
+        pre_middleware: finalized.pre_middleware,
+        dispatch_fn,
+        body_limit,
     });
 
     let addr = listener.local_addr()?;
+
+    // Startup banner
+    if let Some(meta) = &finalized.meta {
+        tracing::info!("{} v{}", meta.title, meta.version);
+    }
     tracing::info!("listening on {addr}");
+    for entry in &finalized.manifest {
+        tracing::info!("  {} {}", entry.method, entry.path);
+    }
+    #[cfg(feature = "openapi")]
+    if finalized.openapi_enabled {
+        tracing::info!("  docs: http://{addr}/docs");
+    }
 
     // Explicit HTTP/1-only builder — matches the embedded-first, HTTP/1-only plan.
     let mut builder = Http1Builder::new();
@@ -106,26 +141,45 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
     }
 }
 
-/// Dispatch a single request through the middleware chain and router.
+/// Entry point for request handling — runs pre-middleware then dispatch.
 async fn handle_request<S: Send + Sync + 'static>(
-    inner: Arc<ServerInner<S>>,
+    inner: Arc<RuntimeInner<S>>,
     req: Request,
 ) -> http::Response<Full<Bytes>> {
-    // Try to match a route.
-    let mut req = req;
-    let endpoint = inner.router.match_route(&mut req, inner.body_limit);
+    if inner.pre_middleware.is_empty() {
+        // Fast path: no pre-routing middleware, go straight to dispatch.
+        dispatch_request(&inner.router, inner.body_limit, req, inner.state.clone()).await
+    } else {
+        let pre_next = PreNext {
+            chain: inner.pre_middleware.clone(),
+            index: 0,
+            dispatch: inner.dispatch_fn.clone(),
+        };
+        pre_next.run(req, inner.state.clone()).await
+    }
+}
 
-    match endpoint {
-        Some(endpoint) => {
+/// Route matching + post-routing middleware + endpoint dispatch.
+async fn dispatch_request<S: Send + Sync + 'static>(
+    router: &Router<S>,
+    body_limit: usize,
+    req: Request,
+    state: Arc<S>,
+) -> http::Response<Full<Bytes>> {
+    let mut req = req;
+    let route = router.match_route(&mut req, body_limit);
+
+    match route {
+        Some(route) => {
             let next = Next {
-                endpoint,
-                middleware: inner.middleware.clone(),
+                endpoint: route.endpoint.clone(),
+                middleware: route.middleware.clone(),
                 index: 0,
             };
-            next.run(req, inner.state.clone()).await
+            next.run(req, state).await
         }
         None => {
-            let allowed = inner.router.allowed_methods(req.uri().path());
+            let allowed = router.allowed_methods(req.uri().path());
             if allowed.is_empty() {
                 // 404 Not Found
                 let mut res = http::Response::new(Full::new(Bytes::from("not found")));

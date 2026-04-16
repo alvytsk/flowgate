@@ -12,6 +12,8 @@ tracing-fmt = ["dep:tracing-subscriber"]
 ws = ["dep:tokio-tungstenite"]
 tls = ["dep:tokio-rustls", "dep:rustls"]
 multi-thread = ["tokio/rt-multi-thread"]
+recover = ["dep:futures-util"]
+openapi = []
 
 [dependencies]
 tokio = { version = "1.52", features = ["rt", "net", "macros"] }
@@ -32,6 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 tokio-tungstenite = { version = "0.29", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 hyper = { version = "1.9", features = ["client"] }

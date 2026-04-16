@@ -133,6 +133,7 @@ name = "flowgate"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
