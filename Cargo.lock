@@ -145,7 +145,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "matchit",
- "pin-project-lite",
  "rustls",
  "serde",
  "serde_json",

@@ -34,7 +34,8 @@ pub async fn serve<S: Send + Sync + 'static>(
             .with_env_filter(
                 EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )
-            .init();
+            .try_init()
+            .ok();
     }
 
     let (state, router, middleware) = app.into_parts();
@@ -67,7 +68,13 @@ pub async fn serve<S: Send + Sync + 'static>(
     }
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::error!("accept error: {e}");
+                continue;
+            }
+        };
         let inner = inner.clone();
         let builder = builder.clone();
 
