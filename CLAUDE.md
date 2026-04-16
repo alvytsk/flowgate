@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Flowgate is a Rust web framework for embedded Linux systems. Single-crate design, single-threaded tokio runtime by default, hyper 1.x underneath.
 
+## Documentation
+
+- **[README.md](README.md)** — project overview, quick start, usage examples, configuration reference
+- **[docs/architecture.md](docs/architecture.md)** — layer diagram, handler erasure, ownership model, dependency table
+
 ## Build & Test Commands
 
 ```bash
