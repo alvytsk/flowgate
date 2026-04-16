@@ -22,7 +22,7 @@ cargo test <test_name>             # Run a single test by name
 cargo clippy --all-targets         # Lint (must be zero warnings)
 cargo doc --no-deps                # Build docs
 cargo run --example hello          # Run the demo server on :8080
-cargo run --example groups         # Run the groups demo with route groups, request IDs
+cargo run --example groups --features openapi  # Groups demo (requires openapi feature)
 ```
 
 Tests use `#[tokio::test(flavor = "current_thread")]` — match this for new tests. Round-trip tests bind random ports via `TcpListener::bind("127.0.0.1:0")`.

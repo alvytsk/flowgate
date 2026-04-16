@@ -135,7 +135,12 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
             });
 
             if let Err(err) = builder.serve_connection(io, service).await {
-                tracing::warn!("connection error from {peer_addr}: {err}");
+                let msg = err.to_string();
+                if msg.contains("timeout") {
+                    tracing::debug!("connection timeout from {peer_addr}: {err}");
+                } else {
+                    tracing::warn!("connection error from {peer_addr}: {err}");
+                }
             }
         });
     }

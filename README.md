@@ -81,6 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```bash
 cargo run --example hello
 # GET http://localhost:8080/hello -> {"msg":"hello world"}
+
+cargo run --example groups --features openapi
+# Routes: /health, /api/v1/users/{id}, /api/v1/admin/stats
+# Docs:   http://localhost:8080/docs
 ```
 
 ---
@@ -323,7 +327,7 @@ cargo test --features openapi         # Include OpenAPI tests
 cargo clippy --all-targets            # Lint (zero warnings required)
 cargo doc --no-deps --open            # Browse API docs
 cargo run --example hello             # Run minimal demo on :8080
-cargo run --example groups            # Run groups demo with request IDs
+cargo run --example groups --features openapi  # Groups demo with OpenAPI docs
 ```
 
 ---
@@ -363,7 +367,7 @@ src/
   openapi_stub.rs     Zero-size OperationMeta stub (when openapi off)
 examples/
   hello.rs            Minimal demo with state and middleware
-  groups.rs           Route groups, request IDs, nested middleware
+  groups.rs           Route groups, request IDs, nested middleware (requires openapi feature)
 tests/
   integration.rs      Round-trip HTTP tests
 docs/

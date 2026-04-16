@@ -36,5 +36,9 @@ tokio-rustls = { version = "0.26", optional = true }
 rustls = { version = "0.23", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 
+[[example]]
+name = "groups"
+required-features = ["openapi"]
+
 [dev-dependencies]
 hyper = { version = "1.9", features = ["client"] }

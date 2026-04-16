@@ -100,7 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .get("/stats", admin_stats),
                 ),
         )
-        .layer(TracingMiddleware);
+        .layer(TracingMiddleware)
+        .with_openapi();
 
     let config = ServerConfig::from_env();
 
