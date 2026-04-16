@@ -352,86 +352,7 @@ impl<S: Send + Sync + 'static> App<S> {
         let openapi_enabled = self.openapi_enabled;
         #[cfg(feature = "openapi")]
         if openapi_enabled {
-            use crate::openapi::spec::{generate_spec, SpecRoute};
-            use crate::openapi::ui::scalar_html;
-
-            // Check for route conflicts with docs paths.
-            for entry in &manifest {
-                if entry.path == "/openapi.json" || entry.path == "/docs" {
-                    return Err(RouteError(format!(
-                        "route registration failed: '{}' conflicts with OpenAPI docs route",
-                        entry.path
-                    )));
-                }
-            }
-
-            // Generate the spec from the manifest.
-            let spec_routes: Vec<SpecRoute> = manifest
-                .iter()
-                .map(|e| SpecRoute {
-                    entry: ManifestEntry {
-                        method: e.method.clone(),
-                        path: e.path.clone(),
-                        tags: e.tags.clone(),
-                        meta: e.meta.clone(),
-                    },
-                    meta: e.meta.clone(),
-                    tags: e.tags.clone(),
-                })
-                .collect();
-
-            let spec_json = generate_spec(&self.meta, &spec_routes);
-            let spec_bytes = serde_json::to_vec_pretty(&spec_json)
-                .unwrap_or_default();
-
-            // Register GET /openapi.json — serves the spec as JSON.
-            let spec_bytes_clone = spec_bytes.clone();
-            let openapi_handler = move || {
-                let body = spec_bytes_clone.clone();
-                async move {
-                    let mut res = http::Response::new(
-                        http_body_util::Full::new(bytes::Bytes::from(body)),
-                    );
-                    res.headers_mut().insert(
-                        http::header::CONTENT_TYPE,
-                        http::HeaderValue::from_static("application/json"),
-                    );
-                    res
-                }
-            };
-            let no_mw: Arc<[Arc<dyn Middleware<S>>]> = Arc::from(Vec::new());
-            router.insert(
-                Method::GET,
-                "/openapi.json",
-                Arc::new(CompiledRoute {
-                    endpoint: into_endpoint(openapi_handler),
-                    middleware: no_mw.clone(),
-                }),
-            )?;
-
-            // Register GET /docs — serves the Scalar UI HTML.
-            let docs_html = scalar_html();
-            let docs_handler = move || {
-                let html = docs_html.clone();
-                async move {
-                    let mut res = http::Response::new(
-                        http_body_util::Full::new(bytes::Bytes::from(html)),
-                    );
-                    res.headers_mut().insert(
-                        http::header::CONTENT_TYPE,
-                        http::HeaderValue::from_static("text/html; charset=utf-8"),
-                    );
-                    res
-                }
-            };
-            router.insert(
-                Method::GET,
-                "/docs",
-                Arc::new(CompiledRoute {
-                    endpoint: into_endpoint(docs_handler),
-                    middleware: no_mw,
-                }),
-            )?;
+            register_openapi_routes(&manifest, &self.meta, &mut router)?;
         }
 
         let pre_mw: Arc<[Arc<dyn PreMiddleware<S>>]> = self.pre_middleware.into();
@@ -474,5 +395,81 @@ fn validate_path(path: &str) -> Result<(), RouteError> {
             "route registration failed: path must start with '/': {path}"
         )));
     }
+    Ok(())
+}
+
+/// Register OpenAPI spec and docs UI routes.
+///
+/// Checks for path conflicts, generates the spec from the manifest,
+/// and inserts `GET /openapi.json` and `GET /docs` into the router.
+#[cfg(feature = "openapi")]
+fn register_openapi_routes<S: Send + Sync + 'static>(
+    manifest: &[ManifestEntry],
+    meta: &Option<AppMeta>,
+    router: &mut Router<S>,
+) -> Result<(), RouteError> {
+    use crate::openapi::spec::generate_spec;
+    use crate::openapi::ui::scalar_html;
+
+    for entry in manifest {
+        if entry.path == "/openapi.json" || entry.path == "/docs" {
+            return Err(RouteError(format!(
+                "route registration failed: '{}' conflicts with OpenAPI docs route",
+                entry.path
+            )));
+        }
+    }
+
+    let spec_json = generate_spec(meta, manifest);
+    let spec_bytes = serde_json::to_vec_pretty(&spec_json).unwrap_or_default();
+
+    // GET /openapi.json — serves the spec as JSON.
+    let openapi_handler = move || {
+        let body = spec_bytes.clone();
+        async move {
+            let mut res = http::Response::new(
+                http_body_util::Full::new(bytes::Bytes::from(body)),
+            );
+            res.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+            res
+        }
+    };
+    let no_mw: Arc<[Arc<dyn Middleware<S>>]> = Arc::from(Vec::new());
+    router.insert(
+        Method::GET,
+        "/openapi.json",
+        Arc::new(CompiledRoute {
+            endpoint: into_endpoint(openapi_handler),
+            middleware: no_mw.clone(),
+        }),
+    )?;
+
+    // GET /docs — serves the Scalar UI HTML.
+    let docs_html = scalar_html();
+    let docs_handler = move || {
+        let html = docs_html.clone();
+        async move {
+            let mut res = http::Response::new(
+                http_body_util::Full::new(bytes::Bytes::from(html)),
+            );
+            res.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            res
+        }
+    };
+    router.insert(
+        Method::GET,
+        "/docs",
+        Arc::new(CompiledRoute {
+            endpoint: into_endpoint(docs_handler),
+            middleware: no_mw,
+        }),
+    )?;
+
     Ok(())
 }

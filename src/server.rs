@@ -163,10 +163,9 @@ async fn handle_request<S: Send + Sync + 'static>(
 async fn dispatch_request<S: Send + Sync + 'static>(
     router: &Router<S>,
     body_limit: usize,
-    req: Request,
+    mut req: Request,
     state: Arc<S>,
 ) -> http::Response<Full<Bytes>> {
-    let mut req = req;
     let route = router.match_route(&mut req, body_limit);
 
     match route {

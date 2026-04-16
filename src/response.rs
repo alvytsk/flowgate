@@ -28,7 +28,12 @@ impl IntoResponse for String {
 
 impl IntoResponse for &'static str {
     fn into_response(self) -> Response {
-        self.to_owned().into_response()
+        let mut res = http::Response::new(Full::new(Bytes::from_static(self.as_bytes())));
+        res.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        res
     }
 }
 

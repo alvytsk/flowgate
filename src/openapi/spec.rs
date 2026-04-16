@@ -1,19 +1,11 @@
 use serde_json::{json, Map, Value};
 
 use crate::app::{AppMeta, ManifestEntry};
-use super::meta::OperationMeta;
-
-/// A manifest entry with optional operation metadata, used for OpenAPI generation.
-pub(crate) struct SpecRoute {
-    pub entry: ManifestEntry,
-    pub meta: Option<OperationMeta>,
-    pub tags: Vec<String>,
-}
 
 /// Generate an OpenAPI 3.1.0 JSON document from app metadata and routes.
 pub(crate) fn generate_spec(
     meta: &Option<AppMeta>,
-    routes: &[SpecRoute],
+    routes: &[ManifestEntry],
 ) -> Value {
     let info = match meta {
         Some(m) => {
@@ -35,8 +27,8 @@ pub(crate) fn generate_spec(
     let mut paths: Map<String, Value> = Map::new();
 
     for route in routes {
-        let method = route.entry.method.as_str().to_lowercase();
-        let path = &route.entry.path;
+        let method = route.method.as_str().to_lowercase();
+        let path = &route.path;
 
         let operation = build_operation(route);
 
@@ -53,7 +45,7 @@ pub(crate) fn generate_spec(
     })
 }
 
-fn build_operation(route: &SpecRoute) -> Value {
+fn build_operation(route: &ManifestEntry) -> Value {
     let mut op: Map<String, Value> = Map::new();
 
     // Merge route-level tags + meta tags
