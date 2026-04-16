@@ -1,12 +1,10 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use http::StatusCode;
-use http_body_util::Full;
 use futures_util::FutureExt;
 
-use crate::body::Request;
+use crate::body::{full, Request};
 use crate::handler::BoxFuture;
 use crate::middleware::{Middleware, Next};
 
@@ -30,9 +28,7 @@ impl<S: Send + Sync + 'static> Middleware<S> for RecoverMiddleware {
                 Ok(response) => response,
                 Err(_panic) => {
                     tracing::error!("handler panicked — recovered");
-                    let mut res = http::Response::new(Full::new(Bytes::from(
-                        "internal server error",
-                    )));
+                    let mut res = http::Response::new(full("internal server error"));
                     *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                     res
                 }

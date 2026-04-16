@@ -46,7 +46,7 @@ impl AppMeta {
 }
 
 /// A route manifest entry — produced at finalization for startup banner and OpenAPI.
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "openapi"), allow(dead_code))]
 pub(crate) struct ManifestEntry {
     pub method: Method,
     pub path: String,
@@ -169,16 +169,35 @@ impl<S: Send + Sync + 'static> App<S> {
         self.route(Method::DELETE, path, handler)
     }
 
+    /// Register a PATCH route.
+    pub fn patch<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
+    where
+        H: Handler<T, S> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.route(Method::PATCH, path, handler)
+    }
+
+    /// Register an OPTIONS route.
+    pub fn options<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
+    where
+        H: Handler<T, S> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.route(Method::OPTIONS, path, handler)
+    }
+
     /// Register a route with operation metadata (for OpenAPI documentation).
     ///
     /// When the `openapi` feature is disabled, the metadata is accepted
     /// but silently dropped.
+    #[allow(unused_variables)]
     pub fn route_with<H, T>(
         mut self,
         method: Method,
         path: &str,
         handler: H,
-        _meta: crate::OperationMeta,
+        meta: crate::OperationMeta,
     ) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
@@ -192,7 +211,7 @@ impl<S: Send + Sync + 'static> App<S> {
             route_middleware: Vec::new(),
             tags: Vec::new(),
             #[cfg(feature = "openapi")]
-            meta: Some(_meta),
+            meta: Some(meta),
         });
         Ok(self)
     }
@@ -251,6 +270,34 @@ impl<S: Send + Sync + 'static> App<S> {
         T: Send + 'static,
     {
         self.route_with(Method::DELETE, path, handler, meta)
+    }
+
+    /// Register a PATCH route with operation metadata.
+    pub fn patch_with<H, T>(
+        self,
+        path: &str,
+        handler: H,
+        meta: crate::OperationMeta,
+    ) -> Result<Self, RouteError>
+    where
+        H: Handler<T, S> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.route_with(Method::PATCH, path, handler, meta)
+    }
+
+    /// Register an OPTIONS route with operation metadata.
+    pub fn options_with<H, T>(
+        self,
+        path: &str,
+        handler: H,
+        meta: crate::OperationMeta,
+    ) -> Result<Self, RouteError>
+    where
+        H: Handler<T, S> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.route_with(Method::OPTIONS, path, handler, meta)
     }
 
     /// Add a post-routing middleware layer.
@@ -427,9 +474,7 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
     let openapi_handler = move || {
         let body = spec_bytes.clone();
         async move {
-            let mut res = http::Response::new(
-                http_body_util::Full::new(bytes::Bytes::from(body)),
-            );
+            let mut res = http::Response::new(crate::body::full(body));
             res.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("application/json"),
@@ -452,9 +497,7 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
     let docs_handler = move || {
         let html = docs_html.clone();
         async move {
-            let mut res = http::Response::new(
-                http_body_util::Full::new(bytes::Bytes::from(html)),
-            );
+            let mut res = http::Response::new(crate::body::full(html));
             res.headers_mut().insert(
                 http::header::CONTENT_TYPE,
                 http::HeaderValue::from_static("text/html; charset=utf-8"),

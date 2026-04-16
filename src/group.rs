@@ -3,6 +3,7 @@ use std::sync::Arc;
 use http::Method;
 
 use crate::app::RawRoute;
+use crate::error::RouteError;
 use crate::handler::{into_endpoint, Handler};
 use crate::middleware::Middleware;
 
@@ -23,14 +24,14 @@ use crate::middleware::Middleware;
 /// let api = Group::new("/api")
 ///     .tag("api")
 ///     .layer(TimeoutMiddleware::new(Duration::from_secs(10)))
-///     .get("/users", list_users)
+///     .get("/users", list_users)?
 ///     .group(
 ///         Group::new("/admin")
 ///             .tag("admin")
-///             .get("/stats", admin_stats)
+///             .get("/stats", admin_stats)?,
 ///     );
 ///
-/// let app = App::new().group(api)?;
+/// let app = App::new().group(api);
 /// ```
 pub struct Group<S> {
     prefix: String,
@@ -67,11 +68,12 @@ impl<S: Send + Sync + 'static> Group<S> {
     }
 
     /// Register a route with a specific HTTP method.
-    pub fn route<H, T>(mut self, method: Method, path: &str, handler: H) -> Self
+    pub fn route<H, T>(mut self, method: Method, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
     {
+        validate_group_route_path(path)?;
         self.routes.push(RawRoute {
             method,
             path: path.to_owned(),
@@ -81,11 +83,11 @@ impl<S: Send + Sync + 'static> Group<S> {
             #[cfg(feature = "openapi")]
             meta: None,
         });
-        self
+        Ok(self)
     }
 
     /// Register a GET route.
-    pub fn get<H, T>(self, path: &str, handler: H) -> Self
+    pub fn get<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -94,7 +96,7 @@ impl<S: Send + Sync + 'static> Group<S> {
     }
 
     /// Register a POST route.
-    pub fn post<H, T>(self, path: &str, handler: H) -> Self
+    pub fn post<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -103,7 +105,7 @@ impl<S: Send + Sync + 'static> Group<S> {
     }
 
     /// Register a PUT route.
-    pub fn put<H, T>(self, path: &str, handler: H) -> Self
+    pub fn put<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -112,12 +114,30 @@ impl<S: Send + Sync + 'static> Group<S> {
     }
 
     /// Register a DELETE route.
-    pub fn delete<H, T>(self, path: &str, handler: H) -> Self
+    pub fn delete<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
     {
         self.route(Method::DELETE, path, handler)
+    }
+
+    /// Register a PATCH route.
+    pub fn patch<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
+    where
+        H: Handler<T, S> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.route(Method::PATCH, path, handler)
+    }
+
+    /// Register an OPTIONS route.
+    pub fn options<H, T>(self, path: &str, handler: H) -> Result<Self, RouteError>
+    where
+        H: Handler<T, S> + Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.route(Method::OPTIONS, path, handler)
     }
 
     /// Nest a subgroup. The subgroup inherits this group's prefix,
@@ -183,6 +203,19 @@ impl<S: Send + Sync + 'static> Group<S> {
         }
 
         result
+    }
+}
+
+/// Validate a group route path — must start with '/' or be empty.
+///
+/// Empty paths are valid for group routes (the group prefix provides the path).
+fn validate_group_route_path(path: &str) -> Result<(), RouteError> {
+    if path.is_empty() || path.starts_with('/') {
+        Ok(())
+    } else {
+        Err(RouteError(format!(
+            "route registration failed: path must start with '/' or be empty: {path}"
+        )))
     }
 }
 

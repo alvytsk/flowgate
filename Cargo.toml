@@ -16,7 +16,7 @@ recover = ["dep:futures-util"]
 openapi = []
 
 [dependencies]
-tokio = { version = "1.52", features = ["rt", "net", "macros"] }
+tokio = { version = "1.52", features = ["rt", "net", "macros", "sync", "time"] }
 hyper = { version = "1.9", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 http = "1.4"

@@ -48,12 +48,17 @@ impl<S: Send + Sync + 'static> Router<S> {
     }
 
     /// Return HTTP methods that have a route matching the given path.
+    /// Automatically includes HEAD when GET is present.
     pub fn allowed_methods(&self, path: &str) -> Vec<Method> {
-        self.routes
+        let mut methods: Vec<Method> = self.routes
             .iter()
             .filter(|(_, router)| router.at(path).is_ok())
             .map(|(method, _)| method.clone())
-            .collect()
+            .collect();
+        if methods.contains(&Method::GET) && !methods.contains(&Method::HEAD) {
+            methods.push(Method::HEAD);
+        }
+        methods
     }
 
     /// Match a request and return the compiled route + inject RequestContext.
@@ -63,9 +68,21 @@ impl<S: Send + Sync + 'static> Router<S> {
         body_limit: usize,
     ) -> Option<Arc<CompiledRoute<S>>> {
         let method = req.method().clone();
+        self.match_route_for_method(req, body_limit, &method)
+    }
+
+    /// Match a request against a specific HTTP method.
+    ///
+    /// Used internally by `match_route` and for HEAD→GET fallback in dispatch.
+    pub(crate) fn match_route_for_method(
+        &self,
+        req: &mut Request,
+        body_limit: usize,
+        method: &Method,
+    ) -> Option<Arc<CompiledRoute<S>>> {
         let path = req.uri().path().to_owned();
 
-        let method_router = self.routes.get(&method)?;
+        let method_router = self.routes.get(method)?;
         let matched = method_router.at(&path).ok()?;
 
         let route_params = RouteParams(

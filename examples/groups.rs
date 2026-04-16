@@ -92,12 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Group::new("/api/v1")
                 .tag("api")
                 .layer(TimeoutMiddleware::new(Duration::from_secs(30)))
-                .get("/users/{id}", get_user)
-                .post("/users", create_user)
+                .get("/users/{id}", get_user)?
+                .post("/users", create_user)?
                 .group(
                     Group::new("/admin")
                         .tag("admin")
-                        .get("/stats", admin_stats),
+                        .get("/stats", admin_stats)?,
                 ),
         )
         .layer(TracingMiddleware)
@@ -105,6 +105,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = ServerConfig::from_env();
 
-    flowgate::server::serve(app, config).await?;
+    let _handle = flowgate::server::serve(app, config).await?;
+
+    // Block forever (Ctrl+C terminates the process).
+    std::future::pending::<()>().await;
     Ok(())
 }

@@ -82,6 +82,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = ServerConfig::from_env();
 
-    flowgate::server::serve(app, config).await?;
+    let _handle = flowgate::server::serve(app, config).await?;
+
+    // Block forever (Ctrl+C terminates the process).
+    std::future::pending::<()>().await;
     Ok(())
 }

@@ -1,16 +1,14 @@
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::body::{Request, Response};
+use crate::body::{full, Request, Response};
+use crate::config::DEFAULT_JSON_BODY_LIMIT;
 use crate::context::RequestContext;
 use crate::error::JsonRejection;
 use crate::extract::FromRequest;
 use crate::response::IntoResponse;
-
-/// Default body size limit: 256 KiB.
-const DEFAULT_BODY_LIMIT: usize = 262_144;
 
 /// JSON extractor and responder.
 ///
@@ -29,7 +27,7 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for Json<T> {
             .extensions
             .get::<RequestContext>()
             .map(|ctx| ctx.body_limit)
-            .unwrap_or(DEFAULT_BODY_LIMIT);
+            .unwrap_or(DEFAULT_JSON_BODY_LIMIT);
 
         let limited = Limited::new(body, limit);
         let collected = limited.collect().await.map_err(|e| {
@@ -49,7 +47,7 @@ impl<T: Serialize> IntoResponse for Json<T> {
     fn into_response(self) -> Response {
         match serde_json::to_vec(&self.0) {
             Ok(body) => {
-                let mut res = http::Response::new(Full::new(Bytes::from(body)));
+                let mut res = http::Response::new(full(Bytes::from(body)));
                 res.headers_mut().insert(
                     http::header::CONTENT_TYPE,
                     http::HeaderValue::from_static("application/json"),
@@ -57,7 +55,7 @@ impl<T: Serialize> IntoResponse for Json<T> {
                 res
             }
             Err(_) => {
-                let mut res = http::Response::new(Full::new(Bytes::from(
+                let mut res = http::Response::new(full(Bytes::from(
                     r#"{"error":"failed to serialize response"}"#,
                 )));
                 *res.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;

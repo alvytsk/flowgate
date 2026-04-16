@@ -1,8 +1,7 @@
 use bytes::Bytes;
 use http::StatusCode;
-use http_body_util::Full;
 
-use crate::body::Response;
+use crate::body::{full, Response};
 
 /// Convert a type into an HTTP response.
 pub trait IntoResponse {
@@ -17,7 +16,7 @@ impl IntoResponse for Response {
 
 impl IntoResponse for String {
     fn into_response(self) -> Response {
-        let mut res = http::Response::new(Full::new(Bytes::from(self)));
+        let mut res = http::Response::new(full(self));
         res.headers_mut().insert(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -28,7 +27,7 @@ impl IntoResponse for String {
 
 impl IntoResponse for &'static str {
     fn into_response(self) -> Response {
-        let mut res = http::Response::new(Full::new(Bytes::from_static(self.as_bytes())));
+        let mut res = http::Response::new(full(Bytes::from_static(self.as_bytes())));
         res.headers_mut().insert(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -39,7 +38,7 @@ impl IntoResponse for &'static str {
 
 impl IntoResponse for StatusCode {
     fn into_response(self) -> Response {
-        let mut res = http::Response::new(Full::new(Bytes::new()));
+        let mut res = http::Response::new(crate::body::empty());
         *res.status_mut() = self;
         res
     }

@@ -37,6 +37,7 @@ pub use middleware::timeout::TimeoutMiddleware;
 #[cfg(feature = "recover")]
 pub use middleware::recover::RecoverMiddleware;
 pub use response::IntoResponse;
+pub use server::ServerHandle;
 
 // OperationMeta: real type when openapi feature is on, zero-size stub when off.
 #[cfg(feature = "openapi")]

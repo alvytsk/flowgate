@@ -39,9 +39,13 @@ The **last** handler argument uses `FromRequest` (may consume body). All precedi
 
 Erased layer (Endpoint, Middleware, Next) passes `Arc<S>`. Extractors receive `&S` — the Handler impl dereferences `&*state`. This split avoids lifetime issues in boxed futures while keeping extractor signatures clean.
 
+### Response body
+
+`Response` uses `BoxBody<Bytes, Infallible>` from `http-body-util`. Use `body::full()` and `body::empty()` helpers to create buffered bodies. The `BoxBody` type-erasure enables future streaming support while keeping the current API simple.
+
 ### Builder/Runtime Split
 
-Routes, groups, and middleware are accumulated raw during building. `serve()` calls an internal `finalize()` that: flattens groups, merges app middleware into each route, builds the matchit router, generates the OpenAPI spec, and produces the frozen runtime state. Builder method order does not affect semantics.
+Routes, groups, and middleware are accumulated raw during building. `serve()` does initialization (finalize, build RuntimeInner), spawns the accept loop, and returns a `ServerHandle` for graceful shutdown. `finalize()` flattens groups, merges app middleware into each route, builds the matchit router, generates the OpenAPI spec, and produces the frozen runtime state. Builder method order does not affect semantics.
 
 ### Middleware chain (post-routing)
 

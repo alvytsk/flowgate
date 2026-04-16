@@ -50,10 +50,6 @@ impl std::error::Error for RequestIdRejection {}
 
 impl IntoResponse for RequestIdRejection {
     fn into_response(self) -> crate::body::Response {
-        let mut res = http::Response::new(http_body_util::Full::new(bytes::Bytes::from(
-            "internal server error: request ID middleware not installed",
-        )));
-        *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-        res
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal server error: request ID middleware not installed").into_response()
     }
 }

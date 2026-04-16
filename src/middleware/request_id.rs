@@ -14,8 +14,8 @@ pub struct RequestId(pub String);
 /// Pre-routing middleware that propagates or generates `X-Request-Id` headers.
 ///
 /// If the incoming request has an `X-Request-Id` header, its value is preserved.
-/// Otherwise, a new ID is generated from a monotonic counter + timestamp
-/// (no `uuid` crate — embedded-first).
+/// Otherwise, a new ID is generated from the process ID (PID) and a monotonic
+/// counter (no `uuid` crate — embedded-first).
 ///
 /// The ID is:
 /// 1. Stored as `RequestId` in request extensions (accessible via the `RequestId` extractor)
@@ -49,9 +49,6 @@ impl<S: Send + Sync + 'static> PreMiddleware<S> for RequestIdMiddleware {
 fn generate_request_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{timestamp:x}-{count:x}")
+    let pid = std::process::id();
+    format!("{pid:x}-{count:x}")
 }

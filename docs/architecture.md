@@ -106,6 +106,16 @@ The dispatch closure is `Arc<dyn Fn(Request, Arc<S>) -> BoxFuture>`, built once 
 - `.with_openapi()` is a declarative toggle; finalization generates the spec and injects `/openapi.json` and `/docs` routes
 - When `openapi` feature is off, `OperationMeta` is a zero-size stub with no-op builders — user code compiles identically
 
+## Known Limitations
+
+### RecoverMiddleware is post-routing only
+
+`RecoverMiddleware` implements `Middleware<S>` (post-routing). It catches panics in handlers and post-routing middleware, but **not** in pre-routing middleware or the routing/dispatch logic itself. This is intentional — matchit routing is infallible in practice, and pre-routing middleware panics are better caught by an outer `catch_unwind` at the connection level if needed.
+
+### Response body type
+
+`Response` uses `BoxBody<Bytes, Infallible>` — a type-erased body that supports both buffered and streaming responses. Helper functions `body::full()` and `body::empty()` create buffered bodies. Streaming producers can create `BoxBody` from any `http_body::Body` impl via `BodyExt::boxed()`.
+
 ## Dependencies
 
 | Crate | Purpose |

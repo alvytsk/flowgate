@@ -386,19 +386,19 @@ fn query_rejection_into_response() {
 // --- Full server round-trip tests ---
 
 /// Helper: spin up a Flowgate server on a random port, return the address.
-async fn serve_app<S: Send + Sync + 'static>(app: App<S>) -> std::net::SocketAddr {
+async fn serve_app<S: Send + Sync + 'static>(
+    app: App<S>,
+) -> (std::net::SocketAddr, flowgate::ServerHandle) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let config = ServerConfig::new().enable_default_tracing(false);
 
-    tokio::spawn(async move {
-        flowgate::server::serve_with_listener(app, config, listener)
-            .await
-            .unwrap();
-    });
+    let handle = flowgate::server::serve_with_listener(app, config, listener)
+        .await
+        .unwrap();
 
-    addr
+    (addr, handle)
 }
 
 /// Make an HTTP/1.1 request and return the response.
@@ -471,7 +471,7 @@ async fn round_trip_get_handler() {
     }
 
     let app = App::new().get("/ping", ping).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/ping", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -497,7 +497,7 @@ async fn round_trip_post_json() {
     }
 
     let app = App::new().post("/double", double).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "POST", "/double", Some(r#"{"x":21}"#)).await;
     assert_eq!(status, StatusCode::OK);
@@ -508,7 +508,7 @@ async fn round_trip_post_json() {
 #[tokio::test(flavor = "current_thread")]
 async fn round_trip_404() {
     let app = App::new();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/missing", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -533,7 +533,7 @@ async fn round_trip_state_extraction() {
     }
 
     let app = App::with_state(Counter { value: 99 }).get("/count", get_count).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/count", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -563,11 +563,9 @@ async fn round_trip_body_limit_enforced() {
         .json_body_limit(32) // 32 bytes
         .enable_default_tracing(false);
 
-    tokio::spawn(async move {
-        flowgate::server::serve_with_listener(app, config, listener)
-            .await
-            .unwrap();
-    });
+    let _handle = flowgate::server::serve_with_listener(app, config, listener)
+        .await
+        .unwrap();
 
     // Send a body larger than 32 bytes
     let big_payload = r#"{"data":"this string is definitely longer than thirty-two bytes"}"#;
@@ -587,7 +585,7 @@ async fn round_trip_path_param() {
     }
 
     let app = App::new().get("/users/{id}", get_user).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/users/42", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -602,7 +600,7 @@ async fn round_trip_path_param_invalid() {
     }
 
     let app = App::new().get("/users/{id}", get_user).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/users/not-a-number", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -628,7 +626,7 @@ async fn round_trip_path_and_json() {
     }
 
     let app = App::new().put("/users/{id}", update_user).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) =
         http_request(addr, "PUT", "/users/7", Some(r#"{"name":"alice"}"#)).await;
@@ -654,7 +652,7 @@ async fn round_trip_query_params() {
     }
 
     let app = App::new().get("/search", search).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/search?q=flowgate", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -689,6 +687,92 @@ async fn route_conflict_returns_error() {
     assert!(err.to_string().contains("route"));
 }
 
+// --- HEAD auto-handling ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_head_on_get_route() {
+    async fn get_handler() -> &'static str {
+        "hello world"
+    }
+
+    let app = App::new().get("/page", get_handler).unwrap();
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, headers, body) = http_request_with_headers(addr, "HEAD", "/page", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty(), "HEAD response body must be empty");
+    assert_eq!(headers.get("content-type").unwrap(), "text/plain; charset=utf-8");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_head_no_get_route() {
+    async fn post_only() -> &'static str {
+        "created"
+    }
+
+    let app = App::new().post("/items", post_only).unwrap();
+    let (addr, _handle) = serve_app(app).await;
+
+    // HEAD on a route with only POST should be 405
+    let (status, _body) = http_request(addr, "HEAD", "/items", None).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_head_nonexistent_route() {
+    async fn handler() -> &'static str { "ok" }
+
+    let app = App::new().get("/exists", handler).unwrap();
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, _body) = http_request(addr, "HEAD", "/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_405_allow_header_includes_head() {
+    async fn handler() -> &'static str { "ok" }
+
+    let app = App::new().get("/item", handler).unwrap();
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, headers, _body) = http_request_with_headers(addr, "DELETE", "/item", None, &[]).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let allow = headers.get("allow").unwrap();
+    assert!(allow.contains("GET"), "Allow header should contain GET");
+    assert!(allow.contains("HEAD"), "Allow header should contain HEAD");
+}
+
+// --- PATCH and OPTIONS ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_patch() {
+    async fn update(Json(payload): Json<TestPayload>) -> Json<TestPayload> {
+        Json(payload)
+    }
+
+    let app = App::new().patch("/items", update).unwrap();
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "PATCH", "/items", Some(r#"{"msg":"patched"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: TestPayload = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed.msg, "patched");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_options() {
+    async fn cors_preflight() -> (http::StatusCode, &'static str) {
+        (StatusCode::NO_CONTENT, "")
+    }
+
+    let app = App::new().options("/resource", cors_preflight).unwrap();
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, _body) = http_request(addr, "OPTIONS", "/resource", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
 // --- 405 Method Not Allowed ---
 
 #[tokio::test(flavor = "current_thread")]
@@ -698,7 +782,7 @@ async fn round_trip_405_method_not_allowed() {
     }
 
     let app = App::new().get("/resource", get_only).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     // POST to a GET-only route
     let (status, body) = http_request(addr, "POST", "/resource", None).await;
@@ -717,7 +801,7 @@ async fn round_trip_405_allow_header() {
         .unwrap()
         .put("/item", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     // DELETE to a route that only has GET + PUT
     let (status, _) = http_request(addr, "DELETE", "/item", None).await;
@@ -731,7 +815,7 @@ async fn round_trip_404_still_works() {
     }
 
     let app = App::new().get("/exists", handler).unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     // Path that matches no route at all
     let (status, _) = http_request(addr, "GET", "/nope", None).await;
@@ -777,7 +861,7 @@ async fn round_trip_middleware_ordering() {
         .layer(TagMiddleware("second"))
         .get("/test", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/test", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -800,9 +884,7 @@ async fn round_trip_middleware_short_circuit() {
             _next: Next<S>,
         ) -> BoxFuture {
             Box::pin(async {
-                let mut res = http::Response::new(
-                    http_body_util::Full::new(bytes::Bytes::from("blocked")),
-                );
+                let mut res = http::Response::new(flowgate::body::full("blocked"));
                 *res.status_mut() = StatusCode::FORBIDDEN;
                 res
             })
@@ -817,7 +899,7 @@ async fn round_trip_middleware_short_circuit() {
         .layer(BlockMiddleware)
         .get("/guarded", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/guarded", None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -853,7 +935,7 @@ async fn round_trip_three_extractors() {
     let app = App::with_state(Prefix("pfx".into()))
         .post("/items/{id}", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) =
         http_request(addr, "POST", "/items/5", Some(r#"{"value":"hello"}"#)).await;
@@ -918,7 +1000,7 @@ async fn round_trip_pre_middleware_ordering() {
         .pre(PreTag("pre"))
         .get("/test", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/test", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -941,9 +1023,7 @@ async fn round_trip_pre_middleware_short_circuit() {
             _next: flowgate::middleware::PreNext<S>,
         ) -> BoxFuture {
             Box::pin(async {
-                let mut res = http::Response::new(
-                    http_body_util::Full::new(bytes::Bytes::from("pre-blocked")),
-                );
+                let mut res = http::Response::new(flowgate::body::full("pre-blocked"));
                 *res.status_mut() = StatusCode::UNAUTHORIZED;
                 res
             })
@@ -958,7 +1038,7 @@ async fn round_trip_pre_middleware_short_circuit() {
         .pre(BlockPre)
         .get("/secret", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/secret", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1003,7 +1083,7 @@ async fn round_trip_layer_after_route_still_applies() {
         .get("/test", handler)
         .unwrap()
         .layer(TagMw);
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/test", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1029,8 +1109,9 @@ async fn round_trip_group_basic() {
         .group(
             Group::new("/api")
                 .get("/users", list_users)
+                .unwrap(),
         );
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/health", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1054,12 +1135,14 @@ async fn round_trip_nested_groups() {
         .group(
             Group::new("/api")
                 .get("/users", users)
+                .unwrap()
                 .group(
                     Group::new("/admin")
                         .get("/stats", stats)
-                )
+                        .unwrap(),
+                ),
         );
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/api/users", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1115,8 +1198,9 @@ async fn round_trip_group_middleware_inheritance() {
             Group::new("/api")
                 .layer(TagMw("group"))
                 .get("/test", handler)
+                .unwrap(),
         );
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/api/test", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -1134,12 +1218,32 @@ async fn round_trip_group_with_path_params() {
     let app = App::new().group(
         Group::new("/api/v1")
             .get("/users/{id}", get_user)
+            .unwrap(),
     );
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/api/v1/users/42", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "user-42");
+}
+
+// --- Group path validation ---
+
+#[test]
+fn group_route_rejects_invalid_path() {
+    async fn handler() -> &'static str { "ok" }
+
+    let result: Result<Group<()>, _> = Group::new("/api").get("users", handler);
+    let err = result.err().expect("expected error for invalid path");
+    assert!(err.to_string().contains("must start with '/'"));
+}
+
+#[test]
+fn group_route_accepts_empty_path() {
+    async fn handler() -> &'static str { "ok" }
+
+    let result: Result<Group<()>, _> = Group::new("/api").route(http::Method::GET, "", handler);
+    assert!(result.is_ok());
 }
 
 // --- Built-in Middleware ---
@@ -1156,7 +1260,7 @@ async fn round_trip_request_id_generated() {
         .pre(RequestIdMiddleware)
         .get("/test", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, headers, _body) = http_request_with_headers(addr, "GET", "/test", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
@@ -1178,7 +1282,7 @@ async fn round_trip_request_id_propagated() {
         .pre(RequestIdMiddleware)
         .get("/test", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, headers, _body) = http_request_with_headers(
         addr,
@@ -1205,7 +1309,7 @@ async fn round_trip_request_id_extractor() {
         .pre(RequestIdMiddleware)
         .get("/test", handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, headers, body) = http_request_with_headers(
         addr,
@@ -1234,7 +1338,7 @@ async fn round_trip_timeout_middleware() {
         .layer(TimeoutMiddleware::new(Duration::from_millis(50)))
         .get("/slow", slow_handler)
         .unwrap();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/slow", None).await;
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
@@ -1263,7 +1367,7 @@ async fn round_trip_openapi_json() {
         )
         .unwrap()
         .with_openapi();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     // /openapi.json should return valid JSON with OpenAPI structure.
     let (status, body) = http_request(addr, "GET", "/openapi.json", None).await;
@@ -1288,7 +1392,7 @@ async fn round_trip_openapi_docs_html() {
         .get("/test", handler)
         .unwrap()
         .with_openapi();
-    let addr = serve_app(app).await;
+    let (addr, _handle) = serve_app(app).await;
 
     // /docs should return HTML.
     let (status, headers, body) =
@@ -1317,4 +1421,50 @@ async fn openapi_route_conflict_detected() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.to_string().contains("conflicts with OpenAPI"));
+}
+
+// --- Connection limit ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_connection_limit() {
+    async fn slow_handler() -> &'static str {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        "done"
+    }
+
+    let app = App::new().get("/slow", slow_handler).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let config = ServerConfig::new()
+        .max_connections(Some(1))
+        .enable_default_tracing(false);
+
+    let _handle = flowgate::server::serve_with_listener(app, config, listener)
+        .await
+        .unwrap();
+
+    // First connection should work.
+    let (status, _) = http_request(addr, "GET", "/slow", None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// --- Graceful shutdown ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_graceful_shutdown() {
+    async fn handler() -> &'static str {
+        "ok"
+    }
+
+    let app = App::new().get("/ping", handler).unwrap();
+    let (addr, handle) = serve_app(app).await;
+
+    // Make a request to verify the server is running.
+    let (status, body) = http_request(addr, "GET", "/ping", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+
+    // Shut down and verify it completes.
+    handle.shutdown().await.unwrap();
 }
