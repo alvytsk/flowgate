@@ -16,7 +16,7 @@ multi-thread = ["tokio/rt-multi-thread"]
 [dependencies]
 tokio = { version = "1.52", features = ["rt", "net", "macros"] }
 hyper = { version = "1.9", features = ["http1", "server"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "http1", "server", "server-auto", "server-graceful"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 http = "1.4"
 http-body = "1.0"
 http-body-util = "0.1.3"

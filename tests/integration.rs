@@ -390,20 +390,14 @@ async fn serve_app<S: Send + Sync + 'static>(app: App<S>) -> std::net::SocketAdd
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let config = ServerConfig::new()
-        .addr(addr.to_string())
-        .enable_default_tracing(false);
-
-    // We can't reuse the listener with `serve`, so re-bind inside `serve`.
-    // Drop our listener and let `serve` bind to the same address.
-    drop(listener);
+    let config = ServerConfig::new().enable_default_tracing(false);
 
     tokio::spawn(async move {
-        flowgate::server::serve(app, config).await.unwrap();
+        flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
     });
 
-    // Give the server a moment to bind.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     addr
 }
 
@@ -541,17 +535,16 @@ async fn round_trip_body_limit_enforced() {
     // Use a tiny body limit
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener);
 
     let config = ServerConfig::new()
-        .addr(addr.to_string())
         .json_body_limit(32) // 32 bytes
         .enable_default_tracing(false);
 
     tokio::spawn(async move {
-        flowgate::server::serve(app, config).await.unwrap();
+        flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Send a body larger than 32 bytes
     let big_payload = r#"{"data":"this string is definitely longer than thirty-two bytes"}"#;

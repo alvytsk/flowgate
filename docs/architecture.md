@@ -15,7 +15,7 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 │   (TracingMiddleware, custom)    │
 ├─────────────────────────────────┤
 │      Extraction / Response      │  extract/*, response.rs
-│  (Json, State, IntoResponse)    │
+│  (Json, Path, Query, State)     │
 ├─────────────────────────────────┤
 │           Routing               │  router.rs
 │   (matchit radix trie, params)  │
@@ -48,6 +48,9 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 - `FromRequest<S>` — extracts from the full request (may consume the body)
 - Handler macro: last argument uses `FromRequest`, all preceding use `FromRequestParts`
 - `State<T>` implements both traits so it can appear in any argument position
+- `Path<T>` — deserializes route parameters via custom serde Deserializer; supports single values, tuples, and structs
+- `Query<T>` — deserializes query string parameters via `serde_urlencoded`
+- `Path<T>`, `Query<T>`, and `State<T>` all implement both traits so they work in any handler position
 
 ### Sub-State Extraction
 
@@ -77,5 +80,6 @@ Flowgate is a Rust web framework for embedded Linux systems with FastAPI-inspire
 | hyper-util | Server utilities, TokioTimer, TokioIo |
 | matchit | Zero-allocation radix trie router |
 | serde + serde_json | JSON serialization |
+| serde_urlencoded | Query string deserialization |
 | tracing | Structured logging |
 | http, http-body, http-body-util | HTTP types and body utilities |
