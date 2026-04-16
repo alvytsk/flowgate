@@ -43,13 +43,13 @@ impl<S: Send + Sync + 'static> Middleware<S> for TracingMiddleware {
             let path = req.uri().path().to_owned();
             let start = std::time::Instant::now();
 
-            tracing::info!("--> {method} {path}");
+            tracing::info!("-> {method} {path}");
 
             let response: Response = next.run(req, state).await;
             let duration = start.elapsed();
             let status = response.status();
 
-            tracing::info!("<-- {method} {path} {} {:?}", status.as_u16(), duration);
+            tracing::info!("<- {method} {path} {} {:?}", status.as_u16(), duration);
 
             response
         })

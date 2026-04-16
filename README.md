@@ -15,18 +15,18 @@
 
 ## 💎 Why Flowgate?
 
-In an ecosystem of heavyweight async frameworks, Flowgate is purpose-built for **constrained environments** where every kilobyte counts.
+In an ecosystem of heavyweight async frameworks, Flowgate is purpose-built for **constrained environments** where resources are tight.
 
 | Feature | Flowgate | Axum | Actix-web | Rocket |
 | :--- | :---: | :---: | :---: | :---: |
 | **Single-Crate Design** | ✅ | ❌ | ❌ | ❌ |
 | **Zero Proc Macros** | ✅ | ✅ | ❌ | ❌ |
 | **Single-Threaded Default** | ✅ | ❌ | ❌ | ❌ |
-| **Compile-Time Extractor Safety** | ✅ | ✅ | ✅ | ✅ |
-| **Embedded-Safe Defaults** | ✅ | ❌ | ❌ | ❌ |
+| **Resource-Constrained Defaults** | ✅ | ❌ | ❌ | ❌ |
 | **Sub-State Projection** | ✅ | ✅ | ❌ | ❌ |
+| **Direct hyper 1.x (no Tower)** | ✅ | ❌ | ❌ | ❌ |
 
-> **"Flowgate is what happens when you bring FastAPI ergonomics to bare-metal Rust — without the macro magic."**
+> **Route handlers are plain async functions with typed arguments — inspired by FastAPI's simplicity, powered by Rust's type system.**
 
 ---
 

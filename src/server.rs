@@ -83,7 +83,7 @@ pub async fn serve<S: Send + Sync + 'static>(
             });
 
             if let Err(err) = builder.serve_connection(io, service).await {
-                tracing::error!("connection error from {addr}: {err}");
+                tracing::warn!("connection error from {addr}: {err}");
             }
         });
     }
