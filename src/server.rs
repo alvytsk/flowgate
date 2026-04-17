@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::body::Incoming;
 use hyper::server::conn::http1::Builder as Http1Builder;
@@ -24,6 +25,7 @@ struct RuntimeInner<S> {
     /// Built once at startup so PreNext doesn't allocate a new closure per request.
     dispatch_fn: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync>,
     body_limit: usize,
+    body_read_timeout: Option<Duration>,
 }
 
 /// Handle to a running server. Allows graceful shutdown.
@@ -84,20 +86,23 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
 
     // Finalize: flatten groups, merge middleware, build matchit router.
     let finalized = app
-        .finalize(config.json_body_limit)
+        .finalize(config.json_body_limit, config.body_read_timeout)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
 
     // Build the dispatch closure once — captures router, body_limit, state.
     // PreNext uses this to call into routing after pre-middleware completes.
     let router = finalized.router;
     let body_limit = finalized.body_limit;
+    let body_read_timeout = finalized.body_read_timeout;
     let router = Arc::new(router);
     let router_for_dispatch = router.clone();
 
     let dispatch_fn: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync> =
         Arc::new(move |req, state| {
             let router = router_for_dispatch.clone();
-            Box::pin(async move { dispatch_request(&router, body_limit, req, state).await })
+            Box::pin(async move {
+                dispatch_request(&router, body_limit, body_read_timeout, req, state).await
+            })
         });
 
     let inner = Arc::new(RuntimeInner {
@@ -106,6 +111,7 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
         pre_middleware: finalized.pre_middleware,
         dispatch_fn,
         body_limit,
+        body_read_timeout,
     });
 
     let local_addr = listener.local_addr()?;
@@ -236,7 +242,14 @@ async fn handle_request<S: Send + Sync + 'static>(
 ) -> crate::body::Response {
     if inner.pre_middleware.is_empty() {
         // Fast path: no pre-routing middleware, go straight to dispatch.
-        dispatch_request(&inner.router, inner.body_limit, req, inner.state.clone()).await
+        dispatch_request(
+            &inner.router,
+            inner.body_limit,
+            inner.body_read_timeout,
+            req,
+            inner.state.clone(),
+        )
+        .await
     } else {
         let pre_next = PreNext {
             chain: inner.pre_middleware.clone(),
@@ -251,19 +264,27 @@ async fn handle_request<S: Send + Sync + 'static>(
 async fn dispatch_request<S: Send + Sync + 'static>(
     router: &Router<S>,
     body_limit: usize,
+    body_read_timeout: Option<Duration>,
     mut req: Request,
     state: Arc<S>,
 ) -> crate::body::Response {
     let is_head = *req.method() == http::Method::HEAD;
 
     // Try exact method match first, then HEAD→GET fallback.
-    let route = router.match_route(&mut req, body_limit).or_else(|| {
-        if is_head {
-            router.match_route_for_method(&mut req, body_limit, &http::Method::GET)
-        } else {
-            None
-        }
-    });
+    let route = router
+        .match_route(&mut req, body_limit, body_read_timeout)
+        .or_else(|| {
+            if is_head {
+                router.match_route_for_method(
+                    &mut req,
+                    body_limit,
+                    body_read_timeout,
+                    &http::Method::GET,
+                )
+            } else {
+                None
+            }
+        });
 
     match route {
         Some(route) => {

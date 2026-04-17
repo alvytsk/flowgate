@@ -11,6 +11,9 @@ pub enum JsonRejection {
     BodyReadError(String),
     /// Failed to deserialize the JSON body.
     InvalidJson(serde_json::Error),
+    /// Body took longer than `ServerConfig::body_read_timeout` to arrive.
+    /// Defends against slow-loris style clients on single-threaded runtimes.
+    BodyReadTimeout,
 }
 
 impl std::fmt::Display for JsonRejection {
@@ -19,6 +22,7 @@ impl std::fmt::Display for JsonRejection {
             Self::PayloadTooLarge => write!(f, "payload too large"),
             Self::BodyReadError(msg) => write!(f, "failed to read body: {msg}"),
             Self::InvalidJson(err) => write!(f, "invalid JSON: {err}"),
+            Self::BodyReadTimeout => write!(f, "body read timeout"),
         }
     }
 }
@@ -34,12 +38,23 @@ impl std::error::Error for JsonRejection {
 
 impl IntoResponse for JsonRejection {
     fn into_response(self) -> Response {
-        let status = match &self {
-            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::BodyReadError(_) => StatusCode::BAD_REQUEST,
-            Self::InvalidJson(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        // Timeout responses close the connection — the client has already
+        // been holding the socket open, and any follow-up on this keep-alive
+        // session is likely to do the same.
+        let (status, close_conn) = match &self {
+            Self::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, false),
+            Self::BodyReadError(_) => (StatusCode::BAD_REQUEST, false),
+            Self::InvalidJson(_) => (StatusCode::UNPROCESSABLE_ENTITY, false),
+            Self::BodyReadTimeout => (StatusCode::REQUEST_TIMEOUT, true),
         };
-        (status, self.to_string()).into_response()
+        let mut res = (status, self.to_string()).into_response();
+        if close_conn {
+            res.headers_mut().insert(
+                http::header::CONNECTION,
+                http::HeaderValue::from_static("close"),
+            );
+        }
+        res
     }
 }
 

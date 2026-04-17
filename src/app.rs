@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::Method;
 
@@ -356,7 +357,11 @@ impl<S: Send + Sync + 'static> App<S> {
     /// middleware chain and inserts all routes into the matchit router.
     /// Route conflicts (e.g. `{id}` vs `{name}` on the same method+path)
     /// surface here as `RouteError`.
-    pub(crate) fn finalize(self, body_limit: usize) -> Result<FinalizedApp<S>, RouteError> {
+    pub(crate) fn finalize(
+        self,
+        body_limit: usize,
+        body_read_timeout: Option<Duration>,
+    ) -> Result<FinalizedApp<S>, RouteError> {
         // 1. Collect all routes: direct routes + flattened groups.
         let mut all_routes = self.routes;
         for group in self.groups {
@@ -409,6 +414,7 @@ impl<S: Send + Sync + 'static> App<S> {
             router,
             pre_middleware: pre_mw,
             body_limit,
+            body_read_timeout,
             manifest,
             meta: self.meta,
             #[cfg(feature = "openapi")]
@@ -423,6 +429,7 @@ pub(crate) struct FinalizedApp<S> {
     pub router: Router<S>,
     pub pre_middleware: Arc<[Arc<dyn PreMiddleware<S>>]>,
     pub body_limit: usize,
+    pub body_read_timeout: Option<Duration>,
     pub manifest: Vec<ManifestEntry>,
     pub meta: Option<AppMeta>,
     #[cfg(feature = "openapi")]

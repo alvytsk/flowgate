@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::Method;
 
@@ -66,9 +67,10 @@ impl<S: Send + Sync + 'static> Router<S> {
         &self,
         req: &mut Request,
         body_limit: usize,
+        body_read_timeout: Option<Duration>,
     ) -> Option<Arc<CompiledRoute<S>>> {
         let method = req.method().clone();
-        self.match_route_for_method(req, body_limit, &method)
+        self.match_route_for_method(req, body_limit, body_read_timeout, &method)
     }
 
     /// Match a request against a specific HTTP method.
@@ -78,6 +80,7 @@ impl<S: Send + Sync + 'static> Router<S> {
         &self,
         req: &mut Request,
         body_limit: usize,
+        body_read_timeout: Option<Duration>,
         method: &Method,
     ) -> Option<Arc<CompiledRoute<S>>> {
         let method_router = self.routes.get(method)?;
@@ -97,6 +100,7 @@ impl<S: Send + Sync + 'static> Router<S> {
         req.extensions_mut().insert(RequestContext {
             route_params,
             body_limit,
+            body_read_timeout,
         });
 
         Some(value)

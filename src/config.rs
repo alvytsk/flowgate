@@ -11,6 +11,11 @@ pub struct ServerConfig {
     pub port: u16,
     /// Maximum JSON body size in bytes. Default: 256 KiB.
     pub json_body_limit: usize,
+    /// Total time allowed to collect a request body inside an extractor.
+    /// Defends against slow-loris clients trickling bytes on single-threaded runtimes.
+    /// Applied by `Json<T>` (and any future body-consuming extractor that opts in).
+    /// `None` disables the timeout. Default: `Some(30s)`.
+    pub body_read_timeout: Option<Duration>,
     /// Enable HTTP/1.1 keep-alive. Default: true.
     pub keep_alive: bool,
     /// Header read timeout. Requires hyper-util TokioTimer.
@@ -30,6 +35,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_owned(),
             port: 8080,
             json_body_limit: DEFAULT_JSON_BODY_LIMIT,
+            body_read_timeout: Some(Duration::from_secs(30)),
             keep_alive: true,
             header_read_timeout: Some(Duration::from_secs(5)),
             max_headers: Some(64),
@@ -92,6 +98,11 @@ impl ServerConfig {
 
     pub fn json_body_limit(mut self, limit: usize) -> Self {
         self.json_body_limit = limit;
+        self
+    }
+
+    pub fn body_read_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.body_read_timeout = timeout;
         self
     }
 

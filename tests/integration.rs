@@ -137,9 +137,11 @@ fn request_context_clone() {
     let ctx = RequestContext {
         route_params: RouteParams(vec![("key".into(), "val".into())]),
         body_limit: 1024,
+        body_read_timeout: Some(std::time::Duration::from_secs(5)),
     };
     let cloned = ctx.clone();
     assert_eq!(cloned.body_limit, 1024);
+    assert_eq!(cloned.body_read_timeout, Some(std::time::Duration::from_secs(5)));
     assert_eq!(cloned.route_params.0.len(), 1);
 }
 
@@ -152,6 +154,10 @@ fn server_config_defaults() {
     assert_eq!(config.port, 8080);
     assert_eq!(config.bind_addr(), "0.0.0.0:8080");
     assert_eq!(config.json_body_limit, 262_144);
+    assert_eq!(
+        config.body_read_timeout,
+        Some(std::time::Duration::from_secs(30))
+    );
     assert!(config.keep_alive);
     assert!(config.header_read_timeout.is_some());
     assert!(config.max_headers.is_some());
@@ -163,6 +169,7 @@ fn server_config_builder() {
     let config = ServerConfig::new()
         .addr("127.0.0.1:3000")
         .json_body_limit(1024)
+        .body_read_timeout(None)
         .keep_alive(false)
         .header_read_timeout(None)
         .max_headers(None)
@@ -172,6 +179,7 @@ fn server_config_builder() {
     assert_eq!(config.port, 3000);
     assert_eq!(config.bind_addr(), "127.0.0.1:3000");
     assert_eq!(config.json_body_limit, 1024);
+    assert!(config.body_read_timeout.is_none());
     assert!(!config.keep_alive);
     assert!(config.header_read_timeout.is_none());
     assert!(config.max_headers.is_none());
@@ -206,6 +214,9 @@ fn json_rejection_display() {
 
     let r = JsonRejection::BodyReadError("test".into());
     assert!(r.to_string().contains("test"));
+
+    let r = JsonRejection::BodyReadTimeout;
+    assert_eq!(r.to_string(), "body read timeout");
 }
 
 #[test]
@@ -214,9 +225,20 @@ fn json_rejection_into_response() {
 
     let res = JsonRejection::PayloadTooLarge.into_response();
     assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(res.headers().get(http::header::CONNECTION).is_none());
 
     let res = JsonRejection::BodyReadError("err".into()).into_response();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(res.headers().get(http::header::CONNECTION).is_none());
+
+    let res = JsonRejection::BodyReadTimeout.into_response();
+    assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        res.headers()
+            .get(http::header::CONNECTION)
+            .and_then(|v| v.to_str().ok()),
+        Some("close"),
+    );
 }
 
 // --- Path extraction ---
@@ -231,6 +253,7 @@ async fn path_single_string() {
     parts.extensions.insert(RequestContext {
         route_params: RouteParams(vec![("name".into(), "alice".into())]),
         body_limit: 262_144,
+        body_read_timeout: None,
     });
 
     let Path(name): Path<String> = Path::from_request_parts(&mut parts, &()).await.unwrap();
@@ -247,6 +270,7 @@ async fn path_single_u64() {
     parts.extensions.insert(RequestContext {
         route_params: RouteParams(vec![("id".into(), "42".into())]),
         body_limit: 262_144,
+        body_read_timeout: None,
     });
 
     let Path(id): Path<u64> = Path::from_request_parts(&mut parts, &()).await.unwrap();
@@ -269,6 +293,7 @@ async fn path_tuple() {
             ("pid".into(), "99".into()),
         ]),
         body_limit: 262_144,
+        body_read_timeout: None,
     });
 
     let Path((uid, pid)): Path<(u64, u64)> =
@@ -299,6 +324,7 @@ async fn path_struct() {
             ("slug".into(), "hello-world".into()),
         ]),
         body_limit: 262_144,
+        body_read_timeout: None,
     });
 
     let Path(p): Path<Params> = Path::from_request_parts(&mut parts, &()).await.unwrap();
@@ -316,6 +342,7 @@ async fn path_invalid_u64_returns_error() {
     parts.extensions.insert(RequestContext {
         route_params: RouteParams(vec![("id".into(), "abc".into())]),
         body_limit: 262_144,
+        body_read_timeout: None,
     });
 
     let result: Result<Path<u64>, _> = Path::from_request_parts(&mut parts, &()).await;
@@ -1447,6 +1474,97 @@ async fn round_trip_connection_limit() {
     // First connection should work.
     let (status, _) = http_request(addr, "GET", "/slow", None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+// --- Body read timeout ---
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_body_read_timeout_stall_returns_408() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct Payload {
+        x: i32,
+    }
+
+    async fn echo(Json(_): Json<Payload>) -> &'static str {
+        "ok"
+    }
+
+    let app = App::new().post("/echo", echo).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let config = ServerConfig::new()
+        .body_read_timeout(Some(std::time::Duration::from_millis(150)))
+        .enable_default_tracing(false);
+
+    let _handle = flowgate::server::serve_with_listener(app, config, listener)
+        .await
+        .unwrap();
+
+    // Raw HTTP/1.1: announce Content-Length: 100, send 6 bytes, then stall.
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = "POST /echo HTTP/1.1\r\n\
+                   Host: localhost\r\n\
+                   Content-Type: application/json\r\n\
+                   Content-Length: 100\r\n\
+                   \r\n\
+                   {\"x\":1";
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    // Server should respond inside the 150 ms timeout (with headroom for CI).
+    let mut buf = Vec::with_capacity(1024);
+    let read =
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream.read_to_end(&mut buf))
+            .await;
+    assert!(read.is_ok(), "server did not respond within 2s (no timeout fired)");
+    read.unwrap().unwrap();
+
+    let response = String::from_utf8_lossy(&buf);
+    assert!(
+        response.starts_with("HTTP/1.1 408"),
+        "expected 408 status line, got: {response:?}"
+    );
+    assert!(
+        response.to_ascii_lowercase().contains("connection: close"),
+        "expected Connection: close header, got: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_body_read_timeout_fast_body_succeeds() {
+    #[derive(Deserialize)]
+    struct Payload {
+        x: i32,
+    }
+    #[derive(Serialize)]
+    struct Out {
+        doubled: i32,
+    }
+
+    async fn double(Json(input): Json<Payload>) -> Json<Out> {
+        Json(Out { doubled: input.x * 2 })
+    }
+
+    let app = App::new().post("/double", double).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Tight timeout, but the client sends the full body immediately — should succeed.
+    let config = ServerConfig::new()
+        .body_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .enable_default_tracing(false);
+
+    let _handle = flowgate::server::serve_with_listener(app, config, listener)
+        .await
+        .unwrap();
+
+    let (status, body) = http_request(addr, "POST", "/double", Some(r#"{"x":21}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["doubled"], 42);
 }
 
 // --- Graceful shutdown ---

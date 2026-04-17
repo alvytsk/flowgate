@@ -23,14 +23,20 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for Json<T> {
     async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let (parts, body) = req.into_parts();
 
-        let limit = parts
-            .extensions
-            .get::<RequestContext>()
-            .map(|ctx| ctx.body_limit)
-            .unwrap_or(DEFAULT_JSON_BODY_LIMIT);
+        let ctx = parts.extensions.get::<RequestContext>();
+        let limit = ctx.map(|c| c.body_limit).unwrap_or(DEFAULT_JSON_BODY_LIMIT);
+        let read_timeout = ctx.and_then(|c| c.body_read_timeout);
 
         let limited = Limited::new(body, limit);
-        let collected = limited.collect().await.map_err(|e| {
+        let collect_fut = limited.collect();
+        let collected = match read_timeout {
+            Some(d) => match tokio::time::timeout(d, collect_fut).await {
+                Ok(r) => r,
+                Err(_elapsed) => return Err(JsonRejection::BodyReadTimeout),
+            },
+            None => collect_fut.await,
+        }
+        .map_err(|e| {
             if e.downcast_ref::<LengthLimitError>().is_some() {
                 JsonRejection::PayloadTooLarge
             } else {
