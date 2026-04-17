@@ -468,7 +468,11 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
     }
 
     let spec_json = generate_spec(meta, manifest);
-    let spec_bytes = serde_json::to_vec_pretty(&spec_json).unwrap_or_default();
+    // Share the serialized spec across every `/openapi.json` request via
+    // `Bytes` — clones are Arc increments, not O(n) buffer copies.
+    let spec_bytes = bytes::Bytes::from(
+        serde_json::to_vec_pretty(&spec_json).unwrap_or_default(),
+    );
 
     // GET /openapi.json — serves the spec as JSON.
     let openapi_handler = move || {
@@ -492,8 +496,8 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
         }),
     )?;
 
-    // GET /docs — serves the Scalar UI HTML.
-    let docs_html = scalar_html();
+    // GET /docs — serves the Scalar UI HTML. Same Bytes-sharing treatment.
+    let docs_html = bytes::Bytes::from(scalar_html());
     let docs_handler = move || {
         let html = docs_html.clone();
         async move {

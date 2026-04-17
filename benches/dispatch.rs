@@ -39,7 +39,8 @@ use tokio::runtime::Runtime;
 use flowgate::handler::BoxFuture;
 use flowgate::middleware::{Next, TracingMiddleware};
 use flowgate::{
-    App, Json, Middleware, Path, Request, RequestIdMiddleware, ServerConfig, TimeoutMiddleware,
+    App, AppMeta, Json, Middleware, Path, Request, RequestIdMiddleware, ServerConfig,
+    TimeoutMiddleware,
 };
 
 // --- Counting global allocator ---------------------------------------------
@@ -138,6 +139,21 @@ fn run_fixture(
     });
 
     let mut sender = rt.block_on(connect(addr));
+
+    // One-shot probe: capture response payload size for context.
+    let payload_size = rt.block_on(async {
+        let res = sender
+            .send_request(build_req())
+            .await
+            .expect("probe send_request");
+        res.into_body()
+            .collect()
+            .await
+            .expect("probe collect")
+            .to_bytes()
+            .len()
+    });
+    eprintln!("[size]  {name:<36} {payload_size:>6} bytes (response payload)");
 
     // Warm up: first-use hashmap rehashes, connection steady-state buffers.
     rt.block_on(async {
@@ -301,6 +317,573 @@ fn bench_openapi_json(c: &mut Criterion) {
     run_fixture(c, "dispatch/openapi_json", app, &|| get("/openapi.json"));
 }
 
+/// Large-spec fixture: ~25 routes across 5 resource families with realistic
+/// metadata (summaries, descriptions, tags, path/query params, request bodies,
+/// response schemas). Content is static across runs so comparisons stay clean.
+#[cfg(feature = "openapi")]
+fn bench_openapi_json_large(c: &mut Criterion) {
+    use flowgate::openapi::meta::{BodyMeta, OperationMeta, ParamMeta, SchemaObject};
+    use serde_json::{json, Map as JsonMap, Value};
+
+    async fn stub() -> &'static str {
+        ""
+    }
+
+    fn obj(props: &[(&str, Value)], required: &[&str]) -> SchemaObject {
+        let mut p = JsonMap::new();
+        for (k, v) in props {
+            p.insert((*k).to_owned(), v.clone());
+        }
+        SchemaObject {
+            schema_type: Some("object".to_owned()),
+            properties: Some(p),
+            required: required.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    let s_str = || json!({"type": "string"});
+    let s_int = || json!({"type": "integer", "format": "int64"});
+    let s_num = || json!({"type": "number", "format": "float"});
+    let s_bool = || json!({"type": "boolean"});
+    let s_dt = || json!({"type": "string", "format": "date-time"});
+
+    let error_schema = obj(
+        &[
+            ("code", s_int()),
+            ("message", s_str()),
+            ("details", s_str()),
+        ],
+        &["code", "message"],
+    );
+
+    let user = obj(
+        &[
+            ("id", s_int()),
+            ("name", s_str()),
+            ("email", s_str()),
+            ("created_at", s_dt()),
+            ("active", s_bool()),
+        ],
+        &["id", "name", "email"],
+    );
+    let user_list = SchemaObject {
+        schema_type: Some("array".to_owned()),
+        items: Some(Box::new(user.clone())),
+        ..Default::default()
+    };
+    let create_user_body = obj(
+        &[("name", s_str()), ("email", s_str())],
+        &["name", "email"],
+    );
+    let update_user_body = obj(&[("name", s_str()), ("email", s_str())], &[]);
+
+    let device = obj(
+        &[
+            ("id", s_int()),
+            ("serial", s_str()),
+            ("status", json!({"type": "string", "enum": ["online","offline","degraded"]})),
+            ("firmware", s_str()),
+            ("last_seen", s_dt()),
+        ],
+        &["id", "serial", "status"],
+    );
+    let device_list = SchemaObject {
+        schema_type: Some("array".to_owned()),
+        items: Some(Box::new(device.clone())),
+        ..Default::default()
+    };
+    let create_device_body = obj(
+        &[("serial", s_str()), ("firmware", s_str())],
+        &["serial"],
+    );
+    let update_device_body = obj(
+        &[
+            ("firmware", s_str()),
+            ("status", json!({"type": "string", "enum": ["online","offline","degraded"]})),
+        ],
+        &[],
+    );
+
+    let sensor = obj(
+        &[
+            ("id", s_int()),
+            ("device_id", s_int()),
+            ("kind", s_str()),
+            ("unit", s_str()),
+        ],
+        &["id", "device_id", "kind"],
+    );
+    let reading = obj(
+        &[
+            ("sensor_id", s_int()),
+            ("value", s_num()),
+            ("recorded_at", s_dt()),
+        ],
+        &["sensor_id", "value", "recorded_at"],
+    );
+    let sensor_list = SchemaObject {
+        schema_type: Some("array".to_owned()),
+        items: Some(Box::new(sensor.clone())),
+        ..Default::default()
+    };
+    let reading_list = SchemaObject {
+        schema_type: Some("array".to_owned()),
+        items: Some(Box::new(reading.clone())),
+        ..Default::default()
+    };
+
+    let event = obj(
+        &[
+            ("id", s_int()),
+            ("device_id", s_int()),
+            ("kind", s_str()),
+            ("severity", json!({"type": "string", "enum": ["info","warning","error"]})),
+            ("message", s_str()),
+            ("occurred_at", s_dt()),
+            ("acknowledged", s_bool()),
+        ],
+        &["id", "kind", "severity", "occurred_at"],
+    );
+    let event_list = SchemaObject {
+        schema_type: Some("array".to_owned()),
+        items: Some(Box::new(event.clone())),
+        ..Default::default()
+    };
+
+    let config_entry = obj(
+        &[
+            ("key", s_str()),
+            ("value", s_str()),
+            ("description", s_str()),
+        ],
+        &["key", "value"],
+    );
+    let update_config_body = obj(&[("value", s_str())], &["value"]);
+
+    let health = obj(
+        &[
+            ("status", s_str()),
+            ("uptime_secs", s_int()),
+            ("version", s_str()),
+        ],
+        &["status"],
+    );
+
+    let page_param = || {
+        ParamMeta::query("page")
+            .description("Page number, 1-indexed")
+            .schema(SchemaObject::integer())
+    };
+    let per_page_param = || {
+        ParamMeta::query("per_page")
+            .description("Results per page (max 100)")
+            .schema(SchemaObject::integer())
+    };
+    let id_path_param = |name: &str, desc: &str| {
+        ParamMeta::path(name)
+            .description(desc)
+            .schema(SchemaObject::integer())
+    };
+
+    // Accumulate everything into one App. Resource family helpers below.
+    let mut app = App::new().meta(
+        AppMeta::new("Flowgate bench API", "1.0.0")
+            .description("Synthetic API used to benchmark OpenAPI spec generation and delivery."),
+    );
+
+    // --- users -----------------------------------------------------------
+    app = app
+        .get_with(
+            "/users",
+            stub,
+            OperationMeta::new()
+                .summary("List users")
+                .description("Return a paginated list of users with optional status filter.")
+                .operation_id("listUsers")
+                .tag("users")
+                .param(page_param())
+                .param(per_page_param())
+                .param(
+                    ParamMeta::query("status")
+                        .description("Filter: active or inactive"),
+                )
+                .response_with_schema(200, "Users page", user_list.clone())
+                .response_with_schema(400, "Invalid query parameters", error_schema.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/users/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Fetch a user by id")
+                .operation_id("getUser")
+                .tag("users")
+                .param(id_path_param("id", "User id"))
+                .response_with_schema(200, "User", user.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .post_with(
+            "/users",
+            stub,
+            OperationMeta::new()
+                .summary("Create a user")
+                .operation_id("createUser")
+                .tag("users")
+                .request_body(BodyMeta::json(create_user_body.clone()))
+                .response_with_schema(201, "Created", user.clone())
+                .response_with_schema(422, "Validation failed", error_schema.clone()),
+        )
+        .unwrap()
+        .put_with(
+            "/users/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Replace a user")
+                .operation_id("replaceUser")
+                .tag("users")
+                .param(id_path_param("id", "User id"))
+                .request_body(BodyMeta::json(create_user_body.clone()))
+                .response_with_schema(200, "Updated", user.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .patch_with(
+            "/users/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Patch a user")
+                .operation_id("patchUser")
+                .tag("users")
+                .param(id_path_param("id", "User id"))
+                .request_body(BodyMeta::json(update_user_body.clone()))
+                .response_with_schema(200, "Updated", user.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .delete_with(
+            "/users/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Delete a user")
+                .operation_id("deleteUser")
+                .tag("users")
+                .param(id_path_param("id", "User id"))
+                .response(204, "Deleted")
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap();
+
+    // --- devices ---------------------------------------------------------
+    app = app
+        .get_with(
+            "/devices",
+            stub,
+            OperationMeta::new()
+                .summary("List devices")
+                .description("Return devices with optional status filter.")
+                .operation_id("listDevices")
+                .tag("devices")
+                .param(page_param())
+                .param(per_page_param())
+                .param(
+                    ParamMeta::query("status")
+                        .description("Filter by status")
+                        .schema(SchemaObject::string()),
+                )
+                .response_with_schema(200, "Devices page", device_list.clone())
+                .response_with_schema(400, "Invalid query parameters", error_schema.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/devices/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Fetch a device")
+                .operation_id("getDevice")
+                .tag("devices")
+                .param(id_path_param("id", "Device id"))
+                .response_with_schema(200, "Device", device.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .post_with(
+            "/devices",
+            stub,
+            OperationMeta::new()
+                .summary("Register a device")
+                .operation_id("createDevice")
+                .tag("devices")
+                .request_body(BodyMeta::json(create_device_body.clone()))
+                .response_with_schema(201, "Created", device.clone()),
+        )
+        .unwrap()
+        .put_with(
+            "/devices/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Update a device")
+                .operation_id("updateDevice")
+                .tag("devices")
+                .param(id_path_param("id", "Device id"))
+                .request_body(BodyMeta::json(update_device_body.clone()))
+                .response_with_schema(200, "Updated", device.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .delete_with(
+            "/devices/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Decommission a device")
+                .operation_id("deleteDevice")
+                .tag("devices")
+                .param(id_path_param("id", "Device id"))
+                .response(204, "Deleted"),
+        )
+        .unwrap()
+        .post_with(
+            "/devices/{id}/ping",
+            stub,
+            OperationMeta::new()
+                .summary("Ping a device")
+                .description("Issue a liveness probe to the device and return the latency.")
+                .operation_id("pingDevice")
+                .tag("devices")
+                .param(id_path_param("id", "Device id"))
+                .response_with_schema(
+                    200,
+                    "Ping result",
+                    obj(
+                        &[("latency_ms", s_int()), ("reachable", s_bool())],
+                        &["latency_ms", "reachable"],
+                    ),
+                )
+                .response_with_schema(504, "Device unreachable", error_schema.clone()),
+        )
+        .unwrap();
+
+    // --- sensors ---------------------------------------------------------
+    app = app
+        .get_with(
+            "/sensors",
+            stub,
+            OperationMeta::new()
+                .summary("List sensors")
+                .operation_id("listSensors")
+                .tag("sensors")
+                .param(page_param())
+                .param(per_page_param())
+                .param(
+                    ParamMeta::query("device_id")
+                        .description("Filter by device id")
+                        .schema(SchemaObject::integer()),
+                )
+                .response_with_schema(200, "Sensors", sensor_list.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/sensors/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Fetch a sensor")
+                .operation_id("getSensor")
+                .tag("sensors")
+                .param(id_path_param("id", "Sensor id"))
+                .response_with_schema(200, "Sensor", sensor.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/sensors/{id}/readings",
+            stub,
+            OperationMeta::new()
+                .summary("List sensor readings")
+                .description("Return recent readings with a configurable window.")
+                .operation_id("listSensorReadings")
+                .tag("sensors")
+                .param(id_path_param("id", "Sensor id"))
+                .param(
+                    ParamMeta::query("since")
+                        .description("Include readings at or after this RFC3339 timestamp")
+                        .schema(SchemaObject::string()),
+                )
+                .param(
+                    ParamMeta::query("limit")
+                        .description("Maximum number of readings returned")
+                        .schema(SchemaObject::integer()),
+                )
+                .response_with_schema(200, "Readings", reading_list.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/sensors/{id}/latest",
+            stub,
+            OperationMeta::new()
+                .summary("Latest reading")
+                .operation_id("getLatestReading")
+                .tag("sensors")
+                .param(id_path_param("id", "Sensor id"))
+                .response_with_schema(200, "Reading", reading.clone())
+                .response_with_schema(404, "No readings yet", error_schema.clone()),
+        )
+        .unwrap();
+
+    // --- events ----------------------------------------------------------
+    app = app
+        .get_with(
+            "/events",
+            stub,
+            OperationMeta::new()
+                .summary("List events")
+                .description("Filter by severity, device, or time window.")
+                .operation_id("listEvents")
+                .tag("events")
+                .param(page_param())
+                .param(per_page_param())
+                .param(
+                    ParamMeta::query("severity")
+                        .description("Filter: info|warning|error")
+                        .schema(SchemaObject::string()),
+                )
+                .param(
+                    ParamMeta::query("device_id")
+                        .description("Filter by device id")
+                        .schema(SchemaObject::integer()),
+                )
+                .response_with_schema(200, "Events", event_list.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/events/{id}",
+            stub,
+            OperationMeta::new()
+                .summary("Fetch an event")
+                .operation_id("getEvent")
+                .tag("events")
+                .param(id_path_param("id", "Event id"))
+                .response_with_schema(200, "Event", event.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .post_with(
+            "/events/{id}/acknowledge",
+            stub,
+            OperationMeta::new()
+                .summary("Acknowledge an event")
+                .operation_id("acknowledgeEvent")
+                .tag("events")
+                .param(id_path_param("id", "Event id"))
+                .response_with_schema(200, "Acknowledged", event.clone())
+                .response_with_schema(409, "Already acknowledged", error_schema.clone()),
+        )
+        .unwrap();
+
+    // --- config ----------------------------------------------------------
+    app = app
+        .get_with(
+            "/config",
+            stub,
+            OperationMeta::new()
+                .summary("List configuration entries")
+                .operation_id("listConfig")
+                .tag("config")
+                .response_with_schema(
+                    200,
+                    "Config entries",
+                    SchemaObject {
+                        schema_type: Some("array".to_owned()),
+                        items: Some(Box::new(config_entry.clone())),
+                        ..Default::default()
+                    },
+                ),
+        )
+        .unwrap()
+        .get_with(
+            "/config/{key}",
+            stub,
+            OperationMeta::new()
+                .summary("Fetch a configuration entry")
+                .operation_id("getConfig")
+                .tag("config")
+                .param(
+                    ParamMeta::path("key")
+                        .description("Configuration key")
+                        .schema(SchemaObject::string()),
+                )
+                .response_with_schema(200, "Entry", config_entry.clone())
+                .response_with_schema(404, "Not found", error_schema.clone()),
+        )
+        .unwrap()
+        .put_with(
+            "/config/{key}",
+            stub,
+            OperationMeta::new()
+                .summary("Update a configuration entry")
+                .operation_id("updateConfig")
+                .tag("config")
+                .param(
+                    ParamMeta::path("key")
+                        .description("Configuration key")
+                        .schema(SchemaObject::string()),
+                )
+                .request_body(BodyMeta::json(update_config_body.clone()))
+                .response_with_schema(200, "Updated", config_entry.clone())
+                .response_with_schema(400, "Invalid value", error_schema.clone()),
+        )
+        .unwrap()
+        .post_with(
+            "/config/reload",
+            stub,
+            OperationMeta::new()
+                .summary("Reload configuration from disk")
+                .description("Triggers a re-read of the on-disk configuration.")
+                .operation_id("reloadConfig")
+                .tag("config")
+                .response(202, "Reload scheduled")
+                .response_with_schema(503, "Reload unavailable", error_schema.clone()),
+        )
+        .unwrap();
+
+    // --- misc ------------------------------------------------------------
+    app = app
+        .get_with(
+            "/health",
+            stub,
+            OperationMeta::new()
+                .summary("Health probe")
+                .operation_id("getHealth")
+                .tag("system")
+                .response_with_schema(200, "Health", health.clone())
+                .response_with_schema(503, "Unhealthy", error_schema.clone()),
+        )
+        .unwrap()
+        .get_with(
+            "/version",
+            stub,
+            OperationMeta::new()
+                .summary("Build / version info")
+                .operation_id("getVersion")
+                .tag("system")
+                .response_with_schema(
+                    200,
+                    "Version",
+                    obj(
+                        &[("version", s_str()), ("commit", s_str()), ("built_at", s_dt())],
+                        &["version"],
+                    ),
+                ),
+        )
+        .unwrap();
+
+    let app = app.with_openapi();
+
+    run_fixture(c, "dispatch/openapi_json_large", app, &|| {
+        get("/openapi.json")
+    });
+}
+
 // --- Main ------------------------------------------------------------------
 
 fn main() {
@@ -320,7 +903,10 @@ fn main() {
     bench_realistic_stack(&mut c);
 
     #[cfg(feature = "openapi")]
-    bench_openapi_json(&mut c);
+    {
+        bench_openapi_json(&mut c);
+        bench_openapi_json_large(&mut c);
+    }
 
     c.final_summary();
 }
