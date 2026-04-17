@@ -106,6 +106,13 @@ The dispatch closure is `Arc<dyn Fn(Request, Arc<S>) -> BoxFuture>`, built once 
 - `.with_openapi()` is a declarative toggle; finalization generates the spec and injects `/openapi.json` and `/docs` routes
 - When `openapi` feature is off, `OperationMeta` is a zero-size stub with no-op builders — user code compiles identically
 
+### Metrics observer hook
+
+- `MetricsObserver` trait is registered via `App::observe(...)` and invoked once per request from `dispatch_request`, **after** the response is produced
+- `RequestEvent` is keyed on the **matched route pattern** (`Arc<str>` stored on `CompiledRoute`), never the raw path — bounded-cardinality labels are the contract for telemetry backends
+- 404 and 405 responses emit the event with `route_pattern: None`
+- Zero-observer fast path: `dispatch_request` reads `observers.is_empty()` and skips the wall-clock read and pattern clone entirely — confirmed byte-identical in the bench matrix
+
 ## Known Limitations
 
 ### RecoverMiddleware is post-routing only

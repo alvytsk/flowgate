@@ -9,7 +9,7 @@
 
 ---
 
-[Features](#key-features) | [Quick Start](#quick-start) | [Route Groups](#route-groups) | [Middleware](#middleware) | [OpenAPI](#openapi-docs) | [Configuration](#server-configuration) | [Architecture](docs/architecture.md)
+[Features](#key-features) | [Quick Start](#quick-start) | [Route Groups](#route-groups) | [Middleware](#middleware) | [Observability](#observability) | [OpenAPI](#openapi-docs) | [Configuration](#server-configuration) | [Architecture](docs/architecture.md)
 
 ---
 
@@ -232,6 +232,53 @@ let app = App::new()
 
 ---
 
+## Observability
+
+Register a `MetricsObserver` to receive a `RequestEvent` for every request — matched routes, 404s, and 405s alike. Observers are the hook point for Prometheus, StatsD, OpenTelemetry, or any custom telemetry pipeline.
+
+```rust
+use flowgate::{App, MetricsObserver, RequestEvent};
+
+struct Counter;
+
+impl MetricsObserver for Counter {
+    fn on_request(&self, event: &RequestEvent<'_>) {
+        // `event.route_pattern` is the *registered* pattern, e.g. `/users/{id}`,
+        // not the per-request path `/users/42`. Use it directly as a label.
+        let label = event.route_pattern.unwrap_or("<unmatched>");
+        tracing::info!(
+            method = %event.method,
+            route = label,
+            status = event.status.as_u16(),
+            duration_us = event.duration.as_micros() as u64,
+            "request"
+        );
+    }
+}
+
+let app = App::new()
+    .get("/users/{id}", get_user)?
+    .observe(Counter);
+```
+
+### Designed for real telemetry backends
+
+`RequestEvent` is deliberately keyed on the **matched route pattern**, not the raw request path. This matters:
+
+- A raw path like `/users/42` produces unbounded label cardinality — Prometheus, StatsD, and every time-series backend will eventually degrade (or cost you real money) if you feed them per-user paths as labels.
+- The registered pattern `/users/{id}` is bounded by your route table. It is the *correct* label for HTTP metrics, matching the convention used by every mature telemetry system.
+
+404 and 405 responses emit the event with `route_pattern: None` — bucket them under a sentinel label of your choice in the observer implementation.
+
+### Callback contract
+
+- **Synchronous.** `on_request` runs inline on the dispatch path. Keep it cheap: an atomic increment, a metric update, a channel send.
+- **Hand off anything that blocks or does I/O.** Pushing to a remote backend, writing to a file, or serializing large payloads — send the event (or a small derived struct) over an `mpsc` channel to a background task. Do not `await` or perform I/O in the observer itself.
+- **Multiple observers supported.** Each call to `.observe(...)` registers an additional observer; they fire in registration order.
+- **Zero cost when unused.** If no observer is registered, the dispatch path skips the wall-clock read entirely and allocates nothing for observation.
+
+---
+
 ## OpenAPI Docs
 
 Enable the `openapi` feature to get automatic spec generation and a Scalar docs UI.
@@ -282,6 +329,7 @@ let config = ServerConfig::new()
     .host("127.0.0.1")
     .port(3000)
     .json_body_limit(128 * 1024)     // 128 KiB
+    .body_read_timeout(Some(Duration::from_secs(30)))
     .keep_alive(true)
     .header_read_timeout(Some(Duration::from_secs(5)))
     .max_headers(Some(32));
@@ -292,6 +340,7 @@ let config = ServerConfig::new()
 | `host` | `0.0.0.0` | Bind address |
 | `port` | `8080` | Bind port |
 | `json_body_limit` | 256 KiB | Max JSON body size (413 on exceed) |
+| `body_read_timeout` | 30 s | Bounds `Json<T>` body collect — returns 408 + `Connection: close` on stall. `None` to disable. |
 | `keep_alive` | `true` | HTTP/1.1 keep-alive |
 | `header_read_timeout` | 5 s | `None` to disable |
 | `max_headers` | 64 | `None` for hyper default |
@@ -322,7 +371,7 @@ cargo build --all-features
 
 ```bash
 cargo build                           # Build the library
-cargo test                            # Run all tests (56 with openapi)
+cargo test                            # Run all tests
 cargo test --features openapi         # Include OpenAPI tests
 cargo clippy --all-targets            # Lint (zero warnings required)
 cargo doc --no-deps --open            # Browse API docs
@@ -346,6 +395,7 @@ src/
   body.rs             Request/Response type aliases
   context.rs          RequestContext, RouteParams (injected per-request)
   error.rs            Rejection types implementing IntoResponse
+  observer.rs         MetricsObserver trait + RequestEvent
   response.rs         IntoResponse trait + impls
   extract/
     mod.rs            FromRequest, FromRequestParts, FromRef traits
@@ -379,6 +429,8 @@ docs/
 ## Documentation
 
 - **[Architecture](docs/architecture.md)** -- layer diagram, builder/runtime split, ownership model, and design rationale
+- **[Performance baseline](docs/perf-baseline.md)** -- benchmark setup, caveats, and the reference matrix future changes compare against
+- **[Changelog](CHANGELOG.md)** -- release notes
 - **`cargo doc --no-deps --open`** -- API reference from doc comments
 
 ---
