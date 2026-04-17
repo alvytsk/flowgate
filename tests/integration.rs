@@ -1476,6 +1476,126 @@ async fn round_trip_connection_limit() {
     assert_eq!(status, StatusCode::OK);
 }
 
+// --- Metrics observer ---
+
+#[derive(Clone, Debug)]
+struct CapturedEvent {
+    method: String,
+    route_pattern: Option<String>,
+    status: u16,
+    duration_is_positive: bool,
+}
+
+#[derive(Default, Clone)]
+struct CapturingObserver {
+    events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+}
+
+impl flowgate::observer::MetricsObserver for CapturingObserver {
+    fn on_request(&self, event: &flowgate::observer::RequestEvent<'_>) {
+        self.events.lock().unwrap().push(CapturedEvent {
+            method: event.method.to_string(),
+            route_pattern: event.route_pattern.map(str::to_owned),
+            status: event.status.as_u16(),
+            duration_is_positive: event.duration > std::time::Duration::ZERO,
+        });
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_observer_captures_matched_route_pattern() {
+    async fn get_user(Path(id): Path<u64>) -> String {
+        format!("user {id}")
+    }
+
+    let observer = CapturingObserver::default();
+    let app = App::new()
+        .get("/users/{id}", get_user)
+        .unwrap()
+        .observe(observer.clone());
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, body) = http_request(addr, "GET", "/users/42", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "user 42");
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    // Raw path is `/users/42`; observer must see the *pattern* for
+    // bounded-cardinality metrics, not the per-request path.
+    assert_eq!(events[0].route_pattern.as_deref(), Some("/users/{id}"));
+    assert_eq!(events[0].method, "GET");
+    assert_eq!(events[0].status, 200);
+    assert!(events[0].duration_is_positive);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_observer_captures_404() {
+    async fn noop() -> &'static str {
+        "unused"
+    }
+
+    let observer = CapturingObserver::default();
+    let app = App::new()
+        .get("/exists", noop)
+        .unwrap()
+        .observe(observer.clone());
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, _) = http_request(addr, "GET", "/missing", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].route_pattern, None);
+    assert_eq!(events[0].status, 404);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_observer_captures_405() {
+    async fn get_only() -> &'static str {
+        "ok"
+    }
+
+    let observer = CapturingObserver::default();
+    let app = App::new()
+        .get("/only-get", get_only)
+        .unwrap()
+        .observe(observer.clone());
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, _) = http_request(addr, "POST", "/only-get", Some("{}")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].route_pattern, None);
+    assert_eq!(events[0].status, 405);
+    assert_eq!(events[0].method, "POST");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round_trip_multiple_observers_all_fire() {
+    async fn ping() -> &'static str {
+        "pong"
+    }
+
+    let a = CapturingObserver::default();
+    let b = CapturingObserver::default();
+    let app = App::new()
+        .get("/ping", ping)
+        .unwrap()
+        .observe(a.clone())
+        .observe(b.clone());
+    let (addr, _handle) = serve_app(app).await;
+
+    let (status, _) = http_request(addr, "GET", "/ping", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(a.events.lock().unwrap().len(), 1);
+    assert_eq!(b.events.lock().unwrap().len(), 1);
+}
+
 // --- Body read timeout ---
 
 #[tokio::test(flavor = "current_thread")]

@@ -14,6 +14,7 @@ use crate::body::Request;
 use crate::config::ServerConfig;
 use crate::handler::BoxFuture;
 use crate::middleware::{Next, PreMiddleware, PreNext};
+use crate::observer::{MetricsObserver, RequestEvent};
 use crate::router::Router;
 
 /// Frozen runtime state shared across all connections.
@@ -26,6 +27,7 @@ struct RuntimeInner<S> {
     dispatch_fn: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync>,
     body_limit: usize,
     body_read_timeout: Option<Duration>,
+    observers: Arc<[Arc<dyn MetricsObserver>]>,
 }
 
 /// Handle to a running server. Allows graceful shutdown.
@@ -96,12 +98,15 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
     let body_read_timeout = finalized.body_read_timeout;
     let router = Arc::new(router);
     let router_for_dispatch = router.clone();
+    let observers_for_dispatch = finalized.observers.clone();
 
     let dispatch_fn: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync> =
         Arc::new(move |req, state| {
             let router = router_for_dispatch.clone();
+            let observers = observers_for_dispatch.clone();
             Box::pin(async move {
-                dispatch_request(&router, body_limit, body_read_timeout, req, state).await
+                dispatch_request(&router, body_limit, body_read_timeout, &observers, req, state)
+                    .await
             })
         });
 
@@ -112,6 +117,7 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
         dispatch_fn,
         body_limit,
         body_read_timeout,
+        observers: finalized.observers,
     });
 
     let local_addr = listener.local_addr()?;
@@ -246,6 +252,7 @@ async fn handle_request<S: Send + Sync + 'static>(
             &inner.router,
             inner.body_limit,
             inner.body_read_timeout,
+            &inner.observers,
             req,
             inner.state.clone(),
         )
@@ -265,10 +272,15 @@ async fn dispatch_request<S: Send + Sync + 'static>(
     router: &Router<S>,
     body_limit: usize,
     body_read_timeout: Option<Duration>,
+    observers: &[Arc<dyn MetricsObserver>],
     mut req: Request,
     state: Arc<S>,
 ) -> crate::body::Response {
     let is_head = *req.method() == http::Method::HEAD;
+    let observing = !observers.is_empty();
+
+    // Only read the clock when someone is actually listening.
+    let started_at = observing.then(tokio::time::Instant::now);
 
     // Try exact method match first, then HEAD→GET fallback.
     let route = router
@@ -286,7 +298,16 @@ async fn dispatch_request<S: Send + Sync + 'static>(
             }
         });
 
-    match route {
+    // Capture for the observer event before `req` is moved into `next.run`.
+    // Both skipped entirely when nobody is observing — keeps the hot path quiet.
+    let method = observing.then(|| req.method().clone());
+    let pattern = if observing {
+        route.as_ref().map(|r| r.pattern.clone())
+    } else {
+        None
+    };
+
+    let response = match route {
         Some(route) => {
             let next = Next {
                 endpoint: route.endpoint.clone(),
@@ -323,5 +344,19 @@ async fn dispatch_request<S: Send + Sync + 'static>(
                 res
             }
         }
+    };
+
+    if let (Some(start), Some(method)) = (started_at, method) {
+        let event = RequestEvent {
+            method: &method,
+            route_pattern: pattern.as_deref(),
+            status: response.status(),
+            duration: start.elapsed(),
+        };
+        for observer in observers {
+            observer.on_request(&event);
+        }
     }
+
+    response
 }

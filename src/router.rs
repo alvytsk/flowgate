@@ -17,6 +17,10 @@ use crate::middleware::Middleware;
 pub(crate) struct CompiledRoute<S> {
     pub endpoint: Arc<dyn Endpoint<S>>,
     pub middleware: Arc<[Arc<dyn Middleware<S>>]>,
+    /// Registered route pattern (e.g. `/users/{id}`) — kept as `Arc<str>` so
+    /// the metrics observer can emit a bounded-cardinality key without
+    /// re-deriving it from the raw path.
+    pub pattern: Arc<str>,
 }
 
 /// HTTP method router backed by matchit radix tries.

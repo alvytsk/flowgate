@@ -7,6 +7,7 @@ use crate::error::RouteError;
 use crate::group::Group;
 use crate::handler::{into_endpoint, Endpoint, Handler};
 use crate::middleware::{Middleware, PreMiddleware};
+use crate::observer::MetricsObserver;
 use crate::router::{CompiledRoute, Router};
 
 /// A raw route captured at builder time — not yet inserted into the matchit router.
@@ -67,6 +68,7 @@ pub struct App<S = ()> {
     pub(crate) groups: Vec<Group<S>>,
     pub(crate) app_middleware: Vec<Arc<dyn Middleware<S>>>,
     pub(crate) pre_middleware: Vec<Arc<dyn PreMiddleware<S>>>,
+    pub(crate) observers: Vec<Arc<dyn MetricsObserver>>,
     pub(crate) meta: Option<AppMeta>,
     #[cfg(feature = "openapi")]
     pub(crate) openapi_enabled: bool,
@@ -81,6 +83,7 @@ impl App<()> {
             groups: Vec::new(),
             app_middleware: Vec::new(),
             pre_middleware: Vec::new(),
+            observers: Vec::new(),
             meta: None,
             #[cfg(feature = "openapi")]
             openapi_enabled: false,
@@ -97,6 +100,7 @@ impl<S: Send + Sync + 'static> App<S> {
             groups: Vec::new(),
             app_middleware: Vec::new(),
             pre_middleware: Vec::new(),
+            observers: Vec::new(),
             meta: None,
             #[cfg(feature = "openapi")]
             openapi_enabled: false,
@@ -321,6 +325,19 @@ impl<S: Send + Sync + 'static> App<S> {
         self
     }
 
+    /// Register a metrics observer.
+    ///
+    /// The observer is invoked once per request, keyed on the matched route
+    /// pattern (or `None` for 404 / method-not-allowed). Multiple observers
+    /// can be registered — each fires in registration order.
+    ///
+    /// Observers run synchronously on the dispatch path; any expensive work
+    /// should be deferred to a background task (e.g. via a channel).
+    pub fn observe<O: MetricsObserver + 'static>(mut self, observer: O) -> Self {
+        self.observers.push(Arc::new(observer));
+        self
+    }
+
     /// Add a route group. Groups carry a path prefix, middleware, and tags
     /// that are inherited by all routes and subgroups within them.
     ///
@@ -392,9 +409,11 @@ impl<S: Send + Sync + 'static> App<S> {
                 merged.extend(raw.route_middleware);
                 Arc::from(merged)
             };
+            let pattern: Arc<str> = Arc::from(raw.path.as_str());
             let compiled = Arc::new(CompiledRoute {
                 endpoint: raw.endpoint,
                 middleware: merged_mw,
+                pattern,
             });
             router.insert(raw.method, &raw.path, compiled)?;
         }
@@ -408,11 +427,13 @@ impl<S: Send + Sync + 'static> App<S> {
         }
 
         let pre_mw: Arc<[Arc<dyn PreMiddleware<S>>]> = self.pre_middleware.into();
+        let observers: Arc<[Arc<dyn MetricsObserver>]> = self.observers.into();
 
         Ok(FinalizedApp {
             state: self.state,
             router,
             pre_middleware: pre_mw,
+            observers,
             body_limit,
             body_read_timeout,
             manifest,
@@ -428,6 +449,7 @@ pub(crate) struct FinalizedApp<S> {
     pub state: Arc<S>,
     pub router: Router<S>,
     pub pre_middleware: Arc<[Arc<dyn PreMiddleware<S>>]>,
+    pub observers: Arc<[Arc<dyn MetricsObserver>]>,
     pub body_limit: usize,
     pub body_read_timeout: Option<Duration>,
     pub manifest: Vec<ManifestEntry>,
@@ -500,6 +522,7 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
         Arc::new(CompiledRoute {
             endpoint: into_endpoint(openapi_handler),
             middleware: no_mw.clone(),
+            pattern: Arc::from("/openapi.json"),
         }),
     )?;
 
@@ -522,6 +545,7 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
         Arc::new(CompiledRoute {
             endpoint: into_endpoint(docs_handler),
             middleware: no_mw,
+            pattern: Arc::from("/docs"),
         }),
     )?;
 

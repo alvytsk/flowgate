@@ -7,6 +7,7 @@ pub mod extract;
 pub mod group;
 pub mod handler;
 pub mod middleware;
+pub mod observer;
 pub mod response;
 pub mod router;
 pub mod server;
@@ -32,6 +33,7 @@ pub use handler::Handler;
 pub use group::Group;
 pub use middleware::Middleware;
 pub use middleware::PreMiddleware;
+pub use observer::{MetricsObserver, RequestEvent};
 pub use middleware::request_id::{RequestId, RequestIdMiddleware};
 pub use middleware::timeout::TimeoutMiddleware;
 #[cfg(feature = "recover")]
