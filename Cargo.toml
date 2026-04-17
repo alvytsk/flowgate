@@ -42,3 +42,8 @@ required-features = ["openapi"]
 
 [dev-dependencies]
 hyper = { version = "1.9", features = ["client"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "dispatch"
+harness = false

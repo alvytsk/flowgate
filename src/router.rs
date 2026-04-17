@@ -80,10 +80,8 @@ impl<S: Send + Sync + 'static> Router<S> {
         body_limit: usize,
         method: &Method,
     ) -> Option<Arc<CompiledRoute<S>>> {
-        let path = req.uri().path().to_owned();
-
         let method_router = self.routes.get(method)?;
-        let matched = method_router.at(&path).ok()?;
+        let matched = method_router.at(req.uri().path()).ok()?;
 
         let route_params = RouteParams(
             matched
@@ -92,12 +90,15 @@ impl<S: Send + Sync + 'static> Router<S> {
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .collect(),
         );
+        let value = matched.value.clone();
+        // `matched` (and its borrow on req.uri().path()) released here; safe
+        // to take &mut req for the RequestContext insert below.
 
         req.extensions_mut().insert(RequestContext {
             route_params,
             body_limit,
         });
 
-        Some(matched.value.clone())
+        Some(value)
     }
 }
