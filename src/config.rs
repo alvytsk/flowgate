@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+/// Default maximum JSON body size: 256 KiB.
+pub const DEFAULT_JSON_BODY_LIMIT: usize = 262_144;
+
 /// Server configuration with embedded-safe defaults.
 pub struct ServerConfig {
     /// Host to bind to (e.g. "0.0.0.0", "127.0.0.1").
@@ -8,12 +11,20 @@ pub struct ServerConfig {
     pub port: u16,
     /// Maximum JSON body size in bytes. Default: 256 KiB.
     pub json_body_limit: usize,
+    /// Total time allowed to collect a request body inside an extractor.
+    /// Defends against slow-loris clients trickling bytes on single-threaded runtimes.
+    /// Applied by `Json<T>` (and any future body-consuming extractor that opts in).
+    /// `None` disables the timeout. Default: `Some(30s)`.
+    pub body_read_timeout: Option<Duration>,
     /// Enable HTTP/1.1 keep-alive. Default: true.
     pub keep_alive: bool,
     /// Header read timeout. Requires hyper-util TokioTimer.
     pub header_read_timeout: Option<Duration>,
     /// Maximum number of headers. Useful for embedded targets.
     pub max_headers: Option<usize>,
+    /// Maximum concurrent connections. `None` means unlimited.
+    /// For embedded targets, consider 128 or 256.
+    pub max_connections: Option<usize>,
     /// Enable the default tracing subscriber. Default: true.
     pub enable_default_tracing: bool,
 }
@@ -23,10 +34,12 @@ impl Default for ServerConfig {
         Self {
             host: "0.0.0.0".to_owned(),
             port: 8080,
-            json_body_limit: 262_144, // 256 KiB
+            json_body_limit: DEFAULT_JSON_BODY_LIMIT,
+            body_read_timeout: Some(Duration::from_secs(30)),
             keep_alive: true,
             header_read_timeout: Some(Duration::from_secs(5)),
             max_headers: Some(64),
+            max_connections: None,
             enable_default_tracing: true,
         }
     }
@@ -88,6 +101,11 @@ impl ServerConfig {
         self
     }
 
+    pub fn body_read_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.body_read_timeout = timeout;
+        self
+    }
+
     pub fn keep_alive(mut self, keep_alive: bool) -> Self {
         self.keep_alive = keep_alive;
         self
@@ -100,6 +118,11 @@ impl ServerConfig {
 
     pub fn max_headers(mut self, max: Option<usize>) -> Self {
         self.max_headers = max;
+        self
+    }
+
+    pub fn max_connections(mut self, max: Option<usize>) -> Self {
+        self.max_connections = max;
         self
     }
 

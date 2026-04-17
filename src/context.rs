@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Owned route parameters extracted from matchit at match time.
 #[derive(Clone, Debug, Default)]
 pub struct RouteParams(pub Vec<(String, String)>);
@@ -9,4 +11,7 @@ pub struct RequestContext {
     pub route_params: RouteParams,
     /// Body size limit for this request (from ServerConfig).
     pub body_limit: usize,
+    /// Total time body-consuming extractors may wait for bytes.
+    /// `None` disables the timeout. Sourced from ServerConfig.
+    pub body_read_timeout: Option<Duration>,
 }

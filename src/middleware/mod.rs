@@ -1,7 +1,54 @@
+pub mod request_id;
+pub mod timeout;
+
+#[cfg(feature = "recover")]
+pub mod recover;
+
 use std::sync::Arc;
 
 use crate::body::{Request, Response};
 use crate::handler::{BoxFuture, Endpoint};
+
+// -- Pre-routing middleware --
+
+/// Pre-routing middleware — runs before route matching.
+///
+/// Does not have access to route params or the matched endpoint.
+/// Can short-circuit by returning a Response instead of calling `next`.
+pub trait PreMiddleware<S>: Send + Sync + 'static {
+    fn call(&self, req: Request, state: Arc<S>, next: PreNext<S>) -> BoxFuture;
+}
+
+/// Chain walker for pre-routing middleware.
+///
+/// Walks the pre-middleware stack by index, then calls the dispatch function
+/// (which performs routing + post-routing middleware + endpoint dispatch).
+/// The dispatch closure is compiled once at server startup.
+pub struct PreNext<S> {
+    pub(crate) chain: Arc<[Arc<dyn PreMiddleware<S>>]>,
+    pub(crate) index: usize,
+    pub(crate) dispatch: Arc<dyn Fn(Request, Arc<S>) -> BoxFuture + Send + Sync>,
+}
+
+impl<S: Send + Sync + 'static> PreNext<S> {
+    /// Run the next pre-middleware, or the dispatch function if all
+    /// pre-middleware have been executed.
+    pub fn run(self, req: Request, state: Arc<S>) -> BoxFuture {
+        if self.index < self.chain.len() {
+            let mw = self.chain[self.index].clone();
+            let next = PreNext {
+                chain: self.chain.clone(),
+                index: self.index + 1,
+                dispatch: self.dispatch.clone(),
+            };
+            mw.call(req, state, next)
+        } else {
+            (self.dispatch)(req, state)
+        }
+    }
+}
+
+// -- Post-routing middleware --
 
 /// Middleware trait — processes requests before they reach the handler.
 pub trait Middleware<S>: Send + Sync + 'static {
