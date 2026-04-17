@@ -1302,7 +1302,7 @@ async fn round_trip_request_id_extractor() {
     use flowgate::RequestIdMiddleware;
 
     async fn handler(rid: RequestId) -> String {
-        rid.0
+        rid.as_str().to_owned()
     }
 
     let app = App::new()
