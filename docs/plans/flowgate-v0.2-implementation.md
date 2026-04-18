@@ -87,44 +87,104 @@ The goal of **this** cycle is to close the remaining production gaps — **TLS, 
 
 ## Implementation Order
 
+Each step below is split into a **summary** (one-line goal) and an **extended** description (what the step actually produces, edge cases it covers, and the verification point that proves it's done). Keep the summary terse; use the extended text when executing so intent doesn't drift.
+
 ### Phase 1 — TLS (`tls` feature)
-1. Add `BoxError` type alias in `src/error.rs`
-2. Add `TlsConfig` + `TlsError` in `src/tls.rs`. `from_pem_files(cert, key)` reads both paths, uses `rustls_pemfile::certs` and `rustls_pemfile::read_all` (iterator) to locate the first PKCS#8 / RSA / SEC1 private key, returns specific `TlsError` variants on failure
-3. Add `tls: Option<TlsConfig>` to `ServerConfig`, builder method
-4. In `src/server.rs`, inside the spawned per-connection task (not the accept task): if `tls` is `Some`, `TlsAcceptor::from(rustls_cfg.clone()).accept(stream).await`; on error, `tracing::warn!` + drop
-5. Wrap the resulting TLS stream in `TokioIo::new(..)` and feed hyper as usual
-6. Configure ALPN on the rustls `ServerConfig`: `["http/1.1"]`
-7. `examples/tls.rs` generates a self-signed cert at startup via `rcgen`, wires `TlsConfig::from_rustls`
-8. `tests/integration.rs::tls_round_trip_https` + `tls_accepts_pkcs8_and_rsa_keys`
+
+**Step 1 — Add `BoxError` type alias.**
+_Extended:_ In `src/error.rs`, introduce `pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>`. Re-export from `lib.rs`. This is the shared error-erasure shape used by `body::stream()` (Phase 2) and any future streaming-body surface. No runtime behavior changes; this step is purely a scaffolding primitive that lets later steps compile without a type-naming detour. Verified by `cargo build` still passing.
+
+**Step 2 — Create `src/tls.rs` with `TlsConfig` + `TlsError`.**
+_Extended:_ Feature-gate the whole module with `#[cfg(feature = "tls")]`. `TlsConfig` wraps `Arc<rustls::ServerConfig>` with ALPN pre-set to `["http/1.1"]`. `TlsError` enum: `NoPrivateKey`, `UnsupportedKeyFormat`, `CertParseError(rustls::Error)`, `KeyParseError(rustls::Error)`, `Io(std::io::Error)`. Two constructors: `from_pem_files(cert_path, key_path)` and `from_rustls(Arc<rustls::ServerConfig>)`. The former uses `rustls_pemfile::certs` for the cert chain and iterates `rustls_pemfile::read_all` to find the first PKCS#8 / RSA (PKCS#1) / SEC1 private-key item — converting each into the correct `rustls::pki_types::PrivateKeyDer` variant. If the key file yields no supported private-key item, return `NoPrivateKey`; if it yields an unrecognized item, `UnsupportedKeyFormat`. Verified by unit tests loading each key format.
+
+**Step 3 — Thread `tls: Option<TlsConfig>` through `ServerConfig`.**
+_Extended:_ Add the field under `#[cfg(feature = "tls")]` to keep the default-feature build unchanged. Add a builder method `.tls(TlsConfig)`. Default is `None`. This is the single switch that toggles the TLS accept path; no other config knobs change. Verified by `cargo build --features tls` and `cargo build` (no feature) both passing.
+
+**Step 4 — Wire TLS acceptance into the per-connection task.**
+_Extended:_ In `src/server.rs`, inside the `tokio::spawn` that currently wraps the accepted `TcpStream` in `TokioIo`, add a feature-gated branch: if `config.tls` is `Some`, build a `TlsAcceptor::from(cfg.0.clone())` once at startup (outside the spawn), clone it into each task, and call `acceptor.accept(stream).await` before `TokioIo::new(..)`. The handshake runs inside the connection task, not the accept loop — a slow handshake from one client cannot stall `accept()`. On handshake error, `tracing::warn!("tls handshake failed from {peer_addr}: {err}")` and drop the stream; the server keeps running. Verified by the TLS round-trip integration test (step 7).
+
+**Step 5 — Confirm ALPN is advertised.**
+_Extended:_ The `TlsConfig` constructors set `alpn_protocols = vec![b"http/1.1".to_vec()]` on the inner `rustls::ServerConfig`. Add a unit test that builds a `TlsConfig` via both constructors and asserts the ALPN list. This is the explicit guard that keeps v0.2 from silently offering HTTP/2 if a user supplies a pre-built rustls config that happens to include it. Verified by the unit test; any future `from_rustls` path that wants to preserve caller-provided ALPN can opt out with a separate method in v0.3.
+
+**Step 6 — Build `examples/tls.rs`.**
+_Extended:_ Uses `rcgen::generate_simple_self_signed(vec!["localhost".into()])` at startup to produce a self-signed cert/key pair in memory, constructs a `rustls::ServerConfig` from them, wraps in `TlsConfig::from_rustls`, and runs a hello handler on 8443. Doc-comment at the top notes `curl -k https://localhost:8443/` as the manual smoke test. Verified by `cargo run --example tls --features tls` + curl.
+
+**Step 7 — Add TLS integration tests.**
+_Extended:_ Two tests in `tests/integration.rs`, both gated on `#[cfg(feature = "tls")]`. `tls_round_trip_https` binds a random port with `TcpListener::bind("127.0.0.1:0")`, serves with an rcgen self-signed cert, and drives a `tokio-rustls` client (with cert verification disabled via a permissive verifier) to GET `/` and assert 200. `tls_accepts_pkcs8_and_rsa_keys` writes both key encodings to tempfiles and calls `TlsConfig::from_pem_files` on each. Verified by `cargo test --features tls`.
 
 ### Phase 2 — SSE (always on)
-9. `src/body.rs::stream()` — signature as spec'd above; wraps `StreamBody::new(mapped_stream).boxed()`
-10. `src/sse.rs` — `Event` + builder; `Sse<S>` with `{ stream, keep_alive: Option<Duration> }`; `Sse::new(stream)`, `Sse::keep_alive(Duration)`; `IntoResponse` that serializes events to `Bytes` and, if `keep_alive` is `Some`, interleaves `:\n\n` comment frames from a `tokio::time::interval` using `futures_util::stream::select`
-11. `examples/sse.rs` — counter emitting every second via `tokio::time::interval`, keep-alive `15s`
-12. `tests/integration.rs::sse_stream_emits_events`
+
+**Step 8 — Add `body::stream()` helper.**
+_Extended:_ In `src/body.rs`, add `pub fn stream<S, E>(s: S) -> ResponseBody where S: Stream<Item = Result<Bytes, E>> + Send + 'static, E: Into<BoxError>`. Implementation maps each item into `Result<Frame<Bytes>, BoxError>` via `Frame::data(..)` and `Into::into`, then wraps with `StreamBody::new(..).boxed()`. The public surface stays on `Bytes` — trailers and raw-frame control are not exposed in v0.2; if needed later, a `frames_stream()` companion can be added without breaking this one. Verified by a unit test that creates a vec-backed stream and reads the body back through `BodyExt::collect`.
+
+**Step 9 — Build the SSE module (`src/sse.rs`).**
+_Extended:_ Unconditional (no feature gate). `Event` is a plain struct with builder methods `data(impl Into<String>)`, `event(impl Into<String>)`, `id(impl Into<String>)`, `retry(Duration)`, and an internal `to_bytes()` that produces the wire representation (each field on its own `key: value\n` line, terminated with a blank line). `Sse<S>` holds `{ stream: S, keep_alive: Option<Duration> }`, with `Sse::new(stream)` and `Sse::keep_alive(Duration)` builder methods. The `IntoResponse` impl sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`; if `keep_alive` is `Some`, it builds a second stream from `tokio::time::interval` that emits the bytes `":\n\n"` (SSE comment — ignored by clients but keeps the socket warm for proxies), and merges the two via `futures_util::stream::select`. Final body goes through `body::stream()`. Verified by step 11.
+
+**Step 10 — Build `examples/sse.rs`.**
+_Extended:_ Handler returns `Sse::new(stream).keep_alive(Duration::from_secs(15))` where `stream` is built from `tokio::time::interval(Duration::from_secs(1))` mapped to `Event::default().data(format!("tick {n}"))`. Doc-comment notes `curl -N http://localhost:8080/events` as the manual smoke test. Verified by `cargo run --example sse` + curl.
+
+**Step 11 — Add SSE integration test.**
+_Extended:_ `sse_stream_emits_events` in `tests/integration.rs`. Binds a random port, registers an `/events` handler that emits three known events and stops (finite stream), builds an HTTP client, reads the response body in chunks, and asserts: response status 200; `Content-Type: text/event-stream`; body contains three `data:` lines with the expected payloads. A second variant test uses a keep-alive interval of 50ms and confirms at least one heartbeat (`:\n\n`) arrives between events. Verified by `cargo test`.
 
 ### Phase 3 — WebSocket (`ws` feature)
-13. `src/ws.rs` — `WebSocketUpgrade` extractor: validate `Upgrade` token-aware (must contain `websocket`), `Connection` token-aware (must contain `upgrade`), `Sec-WebSocket-Version == 13`, `Sec-WebSocket-Key` decodes to 16 bytes; stash `OnUpgrade` from `parts.extensions`
-14. `Sec-WebSocket-Accept`: SHA-1 of `<Key>` + `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`, base64-encoded
-15. `WebSocketUpgrade::on_upgrade(callback)` — builds 101 Response with `Upgrade: websocket`, `Connection: upgrade`, and `Sec-WebSocket-Accept`; spawns a **detached** task that awaits `OnUpgrade` → `WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)` → user callback. Explicitly document that this task is not tracked by `ServerHandle::shutdown`
-16. `WebSocket` wrapper with `send` / `recv` / `close`; re-export `Message` from tungstenite
-17. Update `ServerHandle::shutdown` rustdoc: "Does not wait for WebSocket or other upgraded connections; those run as detached tasks until they complete on their own."
-18. `examples/ws_echo.rs`
-19. `tests/integration.rs::ws_echo_round_trip` + `ws_accepts_compound_connection_header`
+
+**Step 12 — Scaffold `src/ws.rs` with the `WebSocketUpgrade` extractor.**
+_Extended:_ Feature-gated. Add deps `sha1 = "0.10"` and `base64 = "0.22"` under the `ws` feature in `Cargo.toml`. `WebSocketUpgrade` struct holds `{ on_upgrade: hyper::upgrade::OnUpgrade, sec_accept: http::HeaderValue, sub_protocols: Vec<String> }`. `impl FromRequestParts<S> for WebSocketUpgrade`: validates the request with a shared helper `header_contains_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool` that parses comma-separated, case-insensitive tokens — used to check `Connection` contains `upgrade` and `Upgrade` contains `websocket`. Checks `Sec-WebSocket-Version == 13` and that `Sec-WebSocket-Key` base64-decodes to exactly 16 bytes. On failure, returns a `WsError` rejection that `IntoResponse`s to 400 with a clear body. Extracts `OnUpgrade` via `parts.extensions.remove::<OnUpgrade>()`. Verified by compilation plus step 16.
+
+**Step 13 — Compute `Sec-WebSocket-Accept`.**
+_Extended:_ Static GUID `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`. In the extractor, after validation, concatenate the raw `Sec-WebSocket-Key` header string + GUID, SHA-1 the bytes, base64-encode the 20-byte digest. Store the resulting `HeaderValue` in the extractor struct so `on_upgrade` can set it on the 101 response without re-reading request headers. Unit test with the canonical RFC 6455 example: `dGhlIHNhbXBsZSBub25jZQ==` → `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`.
+
+**Step 14 — Implement `on_upgrade(callback)` returning a 101 Response.**
+_Extended:_ `on_upgrade<F, Fut>(self, callback: F) -> Response where F: FnOnce(WebSocket) -> Fut + Send + 'static, Fut: Future<Output = ()> + Send + 'static`. Builds an `http::Response::builder().status(101).header(Upgrade, "websocket").header(Connection, "upgrade").header(Sec-WebSocket-Accept, self.sec_accept)` with an empty body. Before returning, `tokio::spawn`s a **detached** task that awaits `self.on_upgrade.await`, wraps the resulting `Upgraded` via `TokioIo::new(..)`, builds a `WebSocketStream::from_raw_socket(.., Role::Server, None)`, then calls `callback(WebSocket(stream)).await`. If the upgrade future errors, `tracing::warn!` and drop. Explicitly document that this task is not tracked by the connection counter — upgraded tasks survive `ServerHandle::shutdown`. Verified by step 16.
+
+**Step 15 — Add the `WebSocket` wrapper and `Message` re-export.**
+_Extended:_ `WebSocket` is a thin newtype over `tokio_tungstenite::WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>`. Exposes `recv() -> Option<Result<Message, WsError>>`, `send(Message) -> Result<(), WsError>`, `close() -> Result<(), WsError>` as async methods, all delegating to `SinkExt`/`StreamExt` from `futures_util`. Re-export `tokio_tungstenite::tungstenite::Message` as `flowgate::Message` from `lib.rs`. Verified by the echo example compiling.
+
+**Step 16 — Document WS shutdown carve-out on `ServerHandle::shutdown`.**
+_Extended:_ Add a prominent rustdoc note on `ServerHandle::shutdown` in `src/server.rs`: "Does not wait for WebSocket or other upgraded connections — those run as detached tasks and survive shutdown. Applications that need to coordinate upgraded-connection closure should broadcast a shutdown signal via their app state." Mirror this in `docs/architecture.md`. This closes the "shutdown semantics are undefined" concern by writing the behavior down.
+
+**Step 17 — Build `examples/ws_echo.rs`.**
+_Extended:_ Registers `/ws` → handler `async fn ws_handler(ws: WebSocketUpgrade) -> Response { ws.on_upgrade(|mut socket| async move { while let Some(Ok(msg)) = socket.recv().await { if socket.send(msg).await.is_err() { break; } } }) }`. Doc-comment notes `websocat ws://localhost:8080/ws` as the manual smoke test. Verified by `cargo run --example ws_echo --features ws` + websocat.
+
+**Step 18 — Add WS integration tests.**
+_Extended:_ Two tests gated on `#[cfg(feature = "ws")]`. `ws_echo_round_trip` binds random port, runs the echo handler, connects a `tokio-tungstenite` client, sends a text frame, asserts the echo comes back. `ws_accepts_compound_connection_header` is the regression test against naive string equality: a raw HTTP request is crafted (or the client is forced) with `Connection: keep-alive, Upgrade` — the upgrade must succeed. Verified by `cargo test --features ws`.
 
 ### Phase 4 — Arch polish
-20. Delete `src/openapi_stub.rs`; fold into `src/openapi/mod.rs`; update `lib.rs`
-21. Add ergonomic re-exports (`http::{Method, StatusCode, header}`, `bytes::Bytes`, `BoxError`) to `lib.rs`
-22. Doc-comment sweep (flagged items only — don't touch what's already documented)
-23. `cargo clippy --all-targets --all-features -- -D warnings` — fix any new warnings
-24. `cargo doc --no-deps --all-features` — check for broken intra-doc links, fix
+
+**Step 19 — Consolidate `openapi_stub.rs` into `openapi/mod.rs`.**
+_Extended:_ Delete `src/openapi_stub.rs`. Inside `src/openapi/mod.rs`, move the current feature-on contents under `#[cfg(feature = "openapi")] mod spec; #[cfg(feature = "openapi")] pub use spec::*;` (similar for `meta` and `ui` submodules), and add a `#[cfg(not(feature = "openapi"))]` block containing the zero-sized `OperationMeta` stub. Update `src/lib.rs` to have a single unconditional `pub mod openapi;` and remove the `openapi_stub` branch. Verified by `cargo build` (no feature) and `cargo build --features openapi` both passing; the user-facing `OperationMeta` import path is unchanged.
+
+**Step 20 — Add ergonomic re-exports to `lib.rs`.**
+_Extended:_ Append `pub use bytes::Bytes;`, `pub use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};`, and `pub use error::BoxError;`. This eliminates parallel `use http::...` / `use bytes::...` lines in downstream code. Verified by updating `examples/hello.rs` and `examples/groups.rs` to import only from `flowgate::` and watching them still compile.
+
+**Step 21 — Public API surface audit.**
+_Extended:_ Walk `src/app.rs`, `src/group.rs`, `src/router.rs`, `src/server.rs` and confirm that internal types (`RawRoute`, `CompiledRoute`, `RuntimeInner`, `FinalizedApp`, etc.) are `pub(crate)`, not `pub`. Anything public that no external user would reasonably call gets demoted. The goal is a minimal 0.2.0 API surface, since anything public we ship becomes a compatibility promise. Verified by `cargo doc --no-deps --all-features` — inspect the generated rustdoc index and confirm it matches what a user should see.
+
+**Step 22 — Doc-comment sweep.**
+_Extended:_ For every `pub` item in `app.rs`, `group.rs`, `middleware/mod.rs`, `observer.rs`, `extract/*.rs`, `server.rs`, ensure there is at least a one-line `///` comment. Most items already have one — skip anything already documented. No code changes; rustdoc only. Verified by `cargo doc --no-deps --all-features` rendering clean with no missing-docs warnings.
+
+**Step 23 — Clippy clean.**
+_Extended:_ Run `cargo clippy --all-targets --all-features -- -D warnings`. Fix any warnings introduced by the new modules (likely `needless_return`, `redundant_clone`, `uninlined_format_args` patterns). No `#[allow(..)]` without a comment explaining why. Verified by the command exiting 0.
+
+**Step 24 — Doc build clean.**
+_Extended:_ Run `cargo doc --no-deps --all-features` and fix any broken intra-doc links (`[Foo]` that don't resolve) or warnings. The generated HTML is the canonical API reference for the release. Verified by the command exiting 0 with no warnings.
 
 ### Phase 5 — Release prep
-25. Bump `Cargo.toml` version to `0.2.0`
-26. Write `CHANGELOG.md` (`0.2.0` entry + "Deferred to 0.2.x: static files" + "Deferred to 0.3: Tower, HTTP/2, workspace split")
-27. Update `docs/architecture.md` — TLS wiring, SSE streaming primitive, WebSocket upgrade flow, upgraded-connection shutdown semantics, updated dependency table
-28. Update `README.md` — 3 new code snippets (TLS, SSE, WebSocket); feature-flag table refresh; install snippet → `flowgate = "0.2.0"`
-29. `cargo package --allow-dirty` dry-run to catch metadata issues
+
+**Step 25 — Bump `Cargo.toml` version to `0.2.0`.**
+_Extended:_ Single-line change. Resolves the `README.md` / `Cargo.toml` version mismatch, which is the main blocker for publication. Verified by `cargo build` and `cargo package --allow-dirty` both passing.
+
+**Step 26 — Write `CHANGELOG.md`.**
+_Extended:_ New file at repo root. `## 0.2.0 - <date>` entry lists everything landed since 0.1.0, grouped under `Added` (router groups, OpenAPI + Scalar UI, benchmarks, MetricsObserver, pre-routing middleware, RequestId / Timeout / Recover middleware, Path / Query / RequestId extractors, graceful shutdown, PATCH / OPTIONS methods, body-read timeout, TLS, SSE, WebSocket, ergonomic re-exports), `Changed` (consolidated openapi module; `body::stream` helper), and `Deferred` (static files → 0.2.x, Tower adapter / HTTP/2 / workspace split → 0.3). Follows Keep-a-Changelog conventions. Verified by manual read-through.
+
+**Step 27 — Update `docs/architecture.md`.**
+_Extended:_ Add four subsections: "TLS wiring" (where the acceptor lives in the accept-loop flow), "Streaming response bodies" (the `body::stream` primitive and its relationship to `BoxBody`), "WebSocket upgrade flow" (extractor → 101 response → detached task), and "Graceful shutdown and upgraded connections" (the explicit carve-out). Refresh the dependency table. Verified by manual read-through.
+
+**Step 28 — Update `README.md`.**
+_Extended:_ Three new code snippets (minimal TLS setup with `from_pem_files`, SSE counter endpoint with keep-alive, WebSocket echo handler). Update the feature-flag table to reflect all live flags. Bump the install snippet to `flowgate = "0.2.0"`. Verified by manual read-through and rendering the README via `cargo doc --open` if README is linked.
+
+**Step 29 — `cargo package` dry-run.**
+_Extended:_ Run `cargo package --allow-dirty` and confirm `target/package/flowgate-0.2.0.crate` is produced with no warnings about missing metadata (`description`, `license`, `repository`, `readme` all present in `Cargo.toml`). Verify the included file list does not leak anything unintended (no `target/`, no local scratch files). This is the last check before `cargo publish` — which is deliberately left as a manual step outside this plan.
 
 ## Critical Files (for execution reference)
 
