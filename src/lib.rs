@@ -12,6 +12,9 @@ pub mod response;
 pub mod router;
 pub mod server;
 
+#[cfg(feature = "tls")]
+pub mod tls;
+
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
@@ -23,7 +26,9 @@ pub use app::{App, AppMeta};
 pub use body::{Request, Response};
 pub use config::ServerConfig;
 pub use context::{RequestContext, RouteParams};
-pub use error::RouteError;
+pub use error::{BoxError, RouteError};
+#[cfg(feature = "tls")]
+pub use tls::{TlsConfig, TlsError};
 pub use extract::json::Json;
 pub use extract::path::Path;
 pub use extract::query::Query;

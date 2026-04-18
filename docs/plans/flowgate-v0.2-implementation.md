@@ -89,28 +89,65 @@ The goal of **this** cycle is to close the remaining production gaps — **TLS, 
 
 Each step below is split into a **summary** (one-line goal) and an **extended** description (what the step actually produces, edge cases it covers, and the verification point that proves it's done). Keep the summary terse; use the extended text when executing so intent doesn't drift.
 
-### Phase 1 — TLS (`tls` feature)
+### Phase 1 — TLS (`tls` feature) ✅ COMPLETE
 
-**Step 1 — Add `BoxError` type alias.**
+**Step 1 — Add `BoxError` type alias.** ✅
 _Extended:_ In `src/error.rs`, introduce `pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>`. Re-export from `lib.rs`. This is the shared error-erasure shape used by `body::stream()` (Phase 2) and any future streaming-body surface. No runtime behavior changes; this step is purely a scaffolding primitive that lets later steps compile without a type-naming detour. Verified by `cargo build` still passing.
 
-**Step 2 — Create `src/tls.rs` with `TlsConfig` + `TlsError`.**
-_Extended:_ Feature-gate the whole module with `#[cfg(feature = "tls")]`. `TlsConfig` wraps `Arc<rustls::ServerConfig>` with ALPN pre-set to `["http/1.1"]`. `TlsError` enum: `NoPrivateKey`, `UnsupportedKeyFormat`, `CertParseError(rustls::Error)`, `KeyParseError(rustls::Error)`, `Io(std::io::Error)`. Two constructors: `from_pem_files(cert_path, key_path)` and `from_rustls(Arc<rustls::ServerConfig>)`. The former uses `rustls_pemfile::certs` for the cert chain and iterates `rustls_pemfile::read_all` to find the first PKCS#8 / RSA (PKCS#1) / SEC1 private-key item — converting each into the correct `rustls::pki_types::PrivateKeyDer` variant. If the key file yields no supported private-key item, return `NoPrivateKey`; if it yields an unrecognized item, `UnsupportedKeyFormat`. Verified by unit tests loading each key format.
+**Step 2 — Create `src/tls.rs` with `TlsConfig` + `TlsError`.** ✅
+_Extended:_ Feature-gated module (`#[cfg(feature = "tls")]`). `TlsConfig` wraps `Arc<rustls::ServerConfig>` with ALPN pinned to `["http/1.1"]`. `TlsError` enum: `NoCertificates`, `NoPrivateKey`, `UnsupportedKeyFormat`, `InvalidCertOrKey(rustls::Error)`, `Io(std::io::Error)`. Two constructors — `from_pem_files(cert_path, key_path)` and `from_rustls(Arc<rustls::ServerConfig>)`. The PEM loader walks `rustls_pemfile::read_all` and accepts PKCS#8 / RSA (PKCS#1) / SEC1 private-key items, returning `NoPrivateKey` when nothing key-shaped was found and `UnsupportedKeyFormat` when an unrecognized key-like item was present. `from_rustls` overwrites caller-supplied ALPN to guarantee HTTP/1.1 only.
 
-**Step 3 — Thread `tls: Option<TlsConfig>` through `ServerConfig`.**
-_Extended:_ Add the field under `#[cfg(feature = "tls")]` to keep the default-feature build unchanged. Add a builder method `.tls(TlsConfig)`. Default is `None`. This is the single switch that toggles the TLS accept path; no other config knobs change. Verified by `cargo build --features tls` and `cargo build` (no feature) both passing.
+**Step 3 — Thread `tls: Option<TlsConfig>` through `ServerConfig`.** ✅
+_Extended:_ Field added under `#[cfg(feature = "tls")]`; default `None`; builder method `.tls(TlsConfig)`. No other config knobs changed. Default-feature build unaffected.
 
-**Step 4 — Wire TLS acceptance into the per-connection task.**
-_Extended:_ In `src/server.rs`, inside the `tokio::spawn` that currently wraps the accepted `TcpStream` in `TokioIo`, add a feature-gated branch: if `config.tls` is `Some`, build a `TlsAcceptor::from(cfg.0.clone())` once at startup (outside the spawn), clone it into each task, and call `acceptor.accept(stream).await` before `TokioIo::new(..)`. The handshake runs inside the connection task, not the accept loop — a slow handshake from one client cannot stall `accept()`. On handshake error, `tracing::warn!("tls handshake failed from {peer_addr}: {err}")` and drop the stream; the server keeps running. Verified by the TLS round-trip integration test (step 7).
+**Step 4 — Wire TLS acceptance into the per-connection task.** ✅
+_Extended:_ In `src/server.rs`, extracted a generic `serve_one_connection<S, IO>` helper so both the plain-TCP and TLS paths drive hyper identically. `TlsAcceptor::from(cfg.inner())` is built once outside the accept loop and cloned into each spawned task. On handshake error: `tracing::warn!("tls handshake failed from {peer_addr}: {err}")` and drop — the server keeps running. The handshake runs inside the connection task, so slow clients cannot stall `accept()`.
 
-**Step 5 — Confirm ALPN is advertised.**
-_Extended:_ The `TlsConfig` constructors set `alpn_protocols = vec![b"http/1.1".to_vec()]` on the inner `rustls::ServerConfig`. Add a unit test that builds a `TlsConfig` via both constructors and asserts the ALPN list. This is the explicit guard that keeps v0.2 from silently offering HTTP/2 if a user supplies a pre-built rustls config that happens to include it. Verified by the unit test; any future `from_rustls` path that wants to preserve caller-provided ALPN can opt out with a separate method in v0.3.
+**Step 5 — Confirm ALPN is advertised.** ✅
+_Extended:_ Four unit tests in `src/tls.rs::tests`: ALPN is `["http/1.1"]` after `from_pem_files`, ALPN is overwritten to `["http/1.1"]` when `from_rustls` receives a config with `["h2", "http/1.1"]` preset, `NoCertificates` is returned for an empty cert file, `NoPrivateKey` is returned for an empty key file.
 
-**Step 6 — Build `examples/tls.rs`.**
-_Extended:_ Uses `rcgen::generate_simple_self_signed(vec!["localhost".into()])` at startup to produce a self-signed cert/key pair in memory, constructs a `rustls::ServerConfig` from them, wraps in `TlsConfig::from_rustls`, and runs a hello handler on 8443. Doc-comment at the top notes `curl -k https://localhost:8443/` as the manual smoke test. Verified by `cargo run --example tls --features tls` + curl.
+**Step 6 — Build `examples/tls.rs`.** ✅
+_Extended:_ Generates a self-signed cert via `rcgen::generate_simple_self_signed(vec!["localhost"])` at startup, converts the key to PKCS#8 DER, builds a `rustls::ServerConfig`, wraps it in `TlsConfig::from_rustls`, runs a hello handler on `127.0.0.1:8443`. Gated via `[[example]] required-features = ["tls"]` in `Cargo.toml`.
 
-**Step 7 — Add TLS integration tests.**
-_Extended:_ Two tests in `tests/integration.rs`, both gated on `#[cfg(feature = "tls")]`. `tls_round_trip_https` binds a random port with `TcpListener::bind("127.0.0.1:0")`, serves with an rcgen self-signed cert, and drives a `tokio-rustls` client (with cert verification disabled via a permissive verifier) to GET `/` and assert 200. `tls_accepts_pkcs8_and_rsa_keys` writes both key encodings to tempfiles and calls `TlsConfig::from_pem_files` on each. Verified by `cargo test --features tls`.
+**Step 7 — Add TLS integration tests.** ✅
+_Extended:_ Two `#[cfg(feature = "tls")]` tests in `tests/integration.rs::tls_tests`: `tls_round_trip_https` binds a random port, serves with an rcgen self-signed cert, drives a `tokio-rustls` client that trusts the generated cert via a custom `RootCertStore`, and asserts 200 + body. `tls_from_pem_files_round_trip` writes the cert+key to tempfiles and exercises the `from_pem_files` path end-to-end. Both pass under `cargo test --features tls`.
+
+### Phase 1 — How to test
+
+```bash
+# Unit tests (ALPN + key-format discrimination)
+cargo test --features tls --lib tls::
+
+# Integration round-trips (HTTPS client against self-signed server)
+cargo test --features tls --test integration tls_tests
+
+# Full suite across all features
+cargo test --all-features
+
+# Manual smoke test against the example
+cargo run --example tls --features tls
+# (in another terminal)
+curl -k https://localhost:8443/
+# expected: "hello over TLS!"
+```
+
+All 4 unit tests and 2 integration tests pass; the full `--all-features` run is 74 tests, zero failures.
+
+### Phase 1 — Summary of changes
+
+**New files**
+
+- `src/tls.rs` — `TlsConfig`, `TlsError`, PEM loader for PKCS#8 / RSA / SEC1, ALPN enforcement, 4 unit tests
+- `examples/tls.rs` — self-signed HTTPS example on `:8443`
+
+**Modified files**
+
+- `Cargo.toml` — `rustls-pemfile` under the `tls` feature; dev-deps: `rcgen`, `tokio-rustls`, `rustls`, `rustls-pemfile`, `tempfile`, `webpki-roots`, plus `tokio` with `io-util` (fixes a pre-existing build break in the raw-socket timeout test); `[[example]] tls` entry gated on the `tls` feature
+- `src/error.rs` — `pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>`
+- `src/lib.rs` — `pub mod tls` (feature-gated); re-exports `BoxError`, `TlsConfig`, `TlsError`
+- `src/config.rs` — `tls: Option<TlsConfig>` field and `.tls(TlsConfig)` builder method (feature-gated)
+- `src/server.rs` — extracted `serve_one_connection<S, IO>` helper generic over IO, wired a TLS branch that `TlsAcceptor::accept`s inside the per-connection spawn before handing to hyper
+- `tests/integration.rs` — `tls_tests` module with `tls_round_trip_https` and `tls_from_pem_files_round_trip`
 
 ### Phase 2 — SSE (always on)
 

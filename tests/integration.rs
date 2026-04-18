@@ -1702,3 +1702,136 @@ async fn round_trip_graceful_shutdown() {
     // Shut down and verify it completes.
     handle.shutdown().await.unwrap();
 }
+
+// --- TLS tests ---
+
+#[cfg(feature = "tls")]
+mod tls_tests {
+    use super::*;
+    use flowgate::TlsConfig;
+    use http_body_util::Empty;
+    use hyper_util::rt::TokioIo;
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+    use std::io::Write;
+    use std::sync::Arc;
+    use tokio_rustls::TlsConnector;
+
+    struct GeneratedCert {
+        cert_der: CertificateDer<'static>,
+        tls_config: TlsConfig,
+    }
+
+    fn gen_self_signed_tls() -> GeneratedCert {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der =
+            PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let rustls_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der.into())
+            .unwrap();
+        GeneratedCert {
+            cert_der,
+            tls_config: TlsConfig::from_rustls(Arc::new(rustls_cfg)),
+        }
+    }
+
+    fn build_client(trusted: CertificateDer<'static>) -> TlsConnector {
+        let mut roots = RootCertStore::empty();
+        roots.add(trusted).unwrap();
+        let client_cfg = RustlsClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        TlsConnector::from(Arc::new(client_cfg))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tls_round_trip_https() {
+        async fn hello() -> &'static str {
+            "secure hello"
+        }
+
+        let generated = gen_self_signed_tls();
+        let app = App::new().get("/", hello).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = ServerConfig::new()
+            .enable_default_tracing(false)
+            .tls(generated.tls_config);
+        let _handle = flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
+
+        let connector = build_client(generated.cert_der);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let domain = ServerName::try_from("localhost").unwrap();
+        let tls_stream = connector.connect(domain, tcp).await.unwrap();
+
+        let io = TokioIo::new(tls_stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body_bytes[..], b"secure hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tls_from_pem_files_round_trip() {
+        async fn hello() -> &'static str {
+            "pem hello"
+        }
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file.write_all(key_pem.as_bytes()).unwrap();
+
+        let tls = TlsConfig::from_pem_files(cert_file.path(), key_file.path()).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = ServerConfig::new().enable_default_tracing(false).tls(tls);
+        let app = App::new().get("/", hello).unwrap();
+        let _handle = flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
+
+        let connector = build_client(cert.cert.der().clone());
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let domain = ServerName::try_from("localhost").unwrap();
+        let tls_stream = connector.connect(domain, tcp).await.unwrap();
+
+        let io = TokioIo::new(tls_stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+}
