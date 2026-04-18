@@ -198,28 +198,63 @@ All 4 SSE unit tests and 2 SSE integration tests pass; the full `--all-features`
 - `src/lib.rs` — `pub mod sse` (unconditional); re-exports `Event` and `Sse`
 - `tests/integration.rs` — new `sse_tests` module with `sse_stream_emits_events` and `sse_heartbeat_frames_are_emitted`
 
-### Phase 3 — WebSocket (`ws` feature)
+### Phase 3 — WebSocket (`ws` feature) ✅ COMPLETE
 
-**Step 12 — Scaffold `src/ws.rs` with the `WebSocketUpgrade` extractor.**
-_Extended:_ Feature-gated. Add deps `sha1 = "0.10"` and `base64 = "0.22"` under the `ws` feature in `Cargo.toml`. `WebSocketUpgrade` struct holds `{ on_upgrade: hyper::upgrade::OnUpgrade, sec_accept: http::HeaderValue, sub_protocols: Vec<String> }`. `impl FromRequestParts<S> for WebSocketUpgrade`: validates the request with a shared helper `header_contains_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool` that parses comma-separated, case-insensitive tokens — used to check `Connection` contains `upgrade` and `Upgrade` contains `websocket`. Checks `Sec-WebSocket-Version == 13` and that `Sec-WebSocket-Key` base64-decodes to exactly 16 bytes. On failure, returns a `WsError` rejection that `IntoResponse`s to 400 with a clear body. Extracts `OnUpgrade` via `parts.extensions.remove::<OnUpgrade>()`. Verified by compilation plus step 16.
+**Step 12 — Scaffold `src/ws.rs` with the `WebSocketUpgrade` extractor.** ✅
+_Extended:_ Feature-gated module. `sha1 = "0.10"` and `base64 = "0.22"` added as `ws`-gated deps. `WebSocketUpgrade` holds `{ on_upgrade: OnUpgrade, sec_accept: HeaderValue }`. `FromRequestParts<S>` impl validates headers via a shared helper `header_contains_token(headers, name, token)` that parses comma-separated, case-insensitive tokens — used for both `Connection` contains `upgrade` and `Upgrade` contains `websocket`. Further checks: `Sec-WebSocket-Version == 13`, `Sec-WebSocket-Key` present and base64-decodes to exactly 16 bytes. Extracts `OnUpgrade` via `parts.extensions.remove::<OnUpgrade>()`. On failure returns a `WsError` that `IntoResponse`s to 400 with a clear body. Also impls `FromRequest<S>` so `WebSocketUpgrade` can sit alone as a handler argument (the last-arg-is-FromRequest rule).
 
-**Step 13 — Compute `Sec-WebSocket-Accept`.**
-_Extended:_ Static GUID `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`. In the extractor, after validation, concatenate the raw `Sec-WebSocket-Key` header string + GUID, SHA-1 the bytes, base64-encode the 20-byte digest. Store the resulting `HeaderValue` in the extractor struct so `on_upgrade` can set it on the 101 response without re-reading request headers. Unit test with the canonical RFC 6455 example: `dGhlIHNhbXBsZSBub25jZQ==` → `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`.
+**Step 13 — Compute `Sec-WebSocket-Accept`.** ✅
+_Extended:_ `sec_websocket_accept(key)` concatenates the raw `Sec-WebSocket-Key` bytes + GUID `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`, SHA-1s the result, base64-encodes the 20-byte digest, and returns a `HeaderValue`. Stored in the extractor struct so `on_upgrade` can set it on the 101 response without re-reading request headers. Unit test `sec_websocket_accept_rfc_6455_example` validates: `dGhlIHNhbXBsZSBub25jZQ==` → `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`.
 
-**Step 14 — Implement `on_upgrade(callback)` returning a 101 Response.**
-_Extended:_ `on_upgrade<F, Fut>(self, callback: F) -> Response where F: FnOnce(WebSocket) -> Fut + Send + 'static, Fut: Future<Output = ()> + Send + 'static`. Builds an `http::Response::builder().status(101).header(Upgrade, "websocket").header(Connection, "upgrade").header(Sec-WebSocket-Accept, self.sec_accept)` with an empty body. Before returning, `tokio::spawn`s a **detached** task that awaits `self.on_upgrade.await`, wraps the resulting `Upgraded` via `TokioIo::new(..)`, builds a `WebSocketStream::from_raw_socket(.., Role::Server, None)`, then calls `callback(WebSocket(stream)).await`. If the upgrade future errors, `tracing::warn!` and drop. Explicitly document that this task is not tracked by the connection counter — upgraded tasks survive `ServerHandle::shutdown`. Verified by step 16.
+**Step 14 — Implement `on_upgrade(callback)` returning a 101 Response.** ✅
+_Extended:_ `on_upgrade<F, Fut>(self, callback: F) -> Response` where `F: FnOnce(WebSocket) -> Fut + Send + 'static`. Builds a `101 Switching Protocols` response with `Upgrade: websocket`, `Connection: upgrade`, and the pre-computed `Sec-WebSocket-Accept` header, empty body. Before returning the response, `tokio::spawn`s a **detached** task: awaits `on_upgrade.await`, wraps `Upgraded` via `TokioIo::new`, builds `WebSocketStream::from_raw_socket(.., Role::Server, None)`, invokes `callback(WebSocket { inner }).await`. On upgrade error, `tracing::warn!` and drop — never panics. The task is not tracked by any connection counter, and survives `ServerHandle::shutdown` (documented below). **Critical prerequisite:** `src/server.rs` now calls `.with_upgrades()` on the hyper connection — without it hyper tears down the socket after writing the 101 and the upgrade future errors with `ResetWithoutClosingHandshake`.
 
-**Step 15 — Add the `WebSocket` wrapper and `Message` re-export.**
-_Extended:_ `WebSocket` is a thin newtype over `tokio_tungstenite::WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>`. Exposes `recv() -> Option<Result<Message, WsError>>`, `send(Message) -> Result<(), WsError>`, `close() -> Result<(), WsError>` as async methods, all delegating to `SinkExt`/`StreamExt` from `futures_util`. Re-export `tokio_tungstenite::tungstenite::Message` as `flowgate::Message` from `lib.rs`. Verified by the echo example compiling.
+**Step 15 — Add the `WebSocket` wrapper and `Message` re-export.** ✅
+_Extended:_ `WebSocket` is a thin newtype over `WebSocketStream<TokioIo<Upgraded>>`. Exposes async methods `recv() -> Option<Result<Message, WsError>>`, `send(Message) -> Result<(), WsError>`, `close() -> Result<(), WsError>` — the `send`/`close` paths delegate to `SinkExt`, `recv` delegates to `StreamExt::next`. `Message` re-exported from `tokio_tungstenite::tungstenite`. All surfaced through `flowgate::ws::{Message, WebSocket, WebSocketUpgrade, WsError}` plus top-level re-exports in `lib.rs`.
 
-**Step 16 — Document WS shutdown carve-out on `ServerHandle::shutdown`.**
-_Extended:_ Add a prominent rustdoc note on `ServerHandle::shutdown` in `src/server.rs`: "Does not wait for WebSocket or other upgraded connections — those run as detached tasks and survive shutdown. Applications that need to coordinate upgraded-connection closure should broadcast a shutdown signal via their app state." Mirror this in `docs/architecture.md`. This closes the "shutdown semantics are undefined" concern by writing the behavior down.
+**Step 16 — Document WS shutdown carve-out on `ServerHandle::shutdown`.** ✅
+_Extended:_ Rustdoc on `ServerHandle::shutdown` now states explicitly that upgraded connections run as detached tasks, survive shutdown, and are not included in the 30-second drain timer. Recommends a `tokio::sync::broadcast::Sender` in app state for applications that need to coordinate session closure.
 
-**Step 17 — Build `examples/ws_echo.rs`.**
-_Extended:_ Registers `/ws` → handler `async fn ws_handler(ws: WebSocketUpgrade) -> Response { ws.on_upgrade(|mut socket| async move { while let Some(Ok(msg)) = socket.recv().await { if socket.send(msg).await.is_err() { break; } } }) }`. Doc-comment notes `websocat ws://localhost:8080/ws` as the manual smoke test. Verified by `cargo run --example ws_echo --features ws` + websocat.
+**Step 17 — Build `examples/ws_echo.rs`.** ✅
+_Extended:_ Simple echo server on `/ws`; `ws_handler` returns `upgrade.on_upgrade(|mut socket| async move { ... })` with a loop that breaks on close or send error. Gated via `[[example]] required-features = ["ws"]` in `Cargo.toml`.
 
-**Step 18 — Add WS integration tests.**
-_Extended:_ Two tests gated on `#[cfg(feature = "ws")]`. `ws_echo_round_trip` binds random port, runs the echo handler, connects a `tokio-tungstenite` client, sends a text frame, asserts the echo comes back. `ws_accepts_compound_connection_header` is the regression test against naive string equality: a raw HTTP request is crafted (or the client is forced) with `Connection: keep-alive, Upgrade` — the upgrade must succeed. Verified by `cargo test --features ws`.
+**Step 18 — Add WS integration tests.** ✅
+_Extended:_ Two `#[cfg(feature = "ws")]` tests in `tests/integration.rs::ws_tests`. `ws_echo_round_trip` registers the echo handler, connects via `tokio_tungstenite::client_async` over a raw `TcpStream`, sends `Message::Text("hello")`, asserts the echoed message matches. `ws_accepts_compound_connection_header` is the naive-string-equality regression: crafts a raw HTTP/1.1 upgrade request with `Connection: keep-alive, Upgrade` and the RFC 6455 canonical `Sec-WebSocket-Key`, reads the response bytes, and asserts both the `101 Switching Protocols` status and the canonical `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=` accept value. Both pass.
+
+### Phase 3 — How to test
+
+```bash
+# Unit tests (handshake math + header parsing)
+cargo test --features ws --lib ws::
+
+# Integration round-trips (echo + compound Connection header)
+cargo test --features ws --test integration ws_tests
+
+# Full suite
+cargo test --all-features
+
+# Manual smoke test against the example
+cargo run --example ws_echo --features ws
+# (in another terminal, with websocat installed)
+websocat ws://localhost:8080/ws
+# type any line; expect it echoed back
+```
+
+All 5 WS unit tests and 2 WS integration tests pass. Full `--all-features` run is now **78 tests, zero failures**. Clippy is clean at `-D warnings`.
+
+### Phase 3 — Summary of changes
+
+**New files**
+
+- `src/ws.rs` — `WebSocketUpgrade` extractor (FromRequestParts **and** FromRequest), `WebSocket` wrapper with `recv`/`send`/`close`, `WsError` with `IntoResponse` (400), `Message` re-export, token-aware header helper, RFC 6455 `Sec-WebSocket-Accept` computation, 5 unit tests (RFC example + header-token variants)
+- `examples/ws_echo.rs` — echo server on `/ws`, `websocat`-testable
+
+**Modified files**
+
+- `Cargo.toml` — `ws` feature now enables `sha1`, `base64`, and `tokio-tungstenite`; added `[[example]] ws_echo required-features = ["ws"]`; added `tokio-tungstenite` as an unconditional dev-dep for integration-test client; `futures-util` got the `sink` feature (already used transitively)
+- `src/server.rs` — hyper connection driver now calls `.with_upgrades()` before awaiting — **required** for upgrade handoff to work; `ServerHandle::shutdown` rustdoc documents the upgraded-task carve-out
+- `src/lib.rs` — `pub mod ws` (ws-gated); re-exports `Message`, `WebSocket`, `WebSocketUpgrade`, `WsError`
+- `tests/integration.rs` — `ws_tests` module with `ws_echo_round_trip` and `ws_accepts_compound_connection_header`
 
 ### Phase 4 — Arch polish
 

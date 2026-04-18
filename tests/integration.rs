@@ -1933,3 +1933,87 @@ mod sse_tests {
         assert_eq!(&read[..], b":\n\n");
     }
 }
+
+// --- WebSocket tests ---
+
+#[cfg(feature = "ws")]
+mod ws_tests {
+    use super::*;
+    use flowgate::body::Response;
+    use flowgate::ws::{Message, WebSocketUpgrade};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::client_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    async fn echo(upgrade: WebSocketUpgrade) -> Response {
+        upgrade.on_upgrade(|mut socket| async move {
+            while let Some(Ok(msg)) = socket.recv().await {
+                if msg.is_close() {
+                    break;
+                }
+                if socket.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_echo_round_trip() {
+        let app = App::new().get("/ws", echo).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let url = format!("ws://{addr}/ws");
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let request = url.into_client_request().unwrap();
+        let (mut ws_stream, _response) = client_async(request, stream).await.unwrap();
+
+        ws_stream
+            .send(Message::Text("hello".into()))
+            .await
+            .unwrap();
+
+        let echoed = ws_stream.next().await.unwrap().unwrap();
+        match echoed {
+            Message::Text(text) => assert_eq!(text.as_str(), "hello"),
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    /// Regression test for naive string-equality header checking.
+    /// A spec-compliant `Connection: keep-alive, Upgrade` must succeed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_accepts_compound_connection_header() {
+        let app = App::new().get("/ws", echo).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Raw HTTP/1.1 upgrade request with a compound Connection header.
+        let req = b"GET /ws HTTP/1.1\r\n\
+            Host: localhost\r\n\
+            Connection: keep-alive, Upgrade\r\n\
+            Upgrade: websocket\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            \r\n";
+        stream.write_all(req).await.unwrap();
+
+        // Read just the status line and first header batch.
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        let resp = std::str::from_utf8(&buf[..n]).unwrap();
+
+        assert!(
+            resp.starts_with("HTTP/1.1 101 Switching Protocols"),
+            "expected 101 response, got:\n{resp}"
+        );
+        // Expected Sec-WebSocket-Accept for the canonical example key.
+        assert!(
+            resp.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+            "expected canonical Sec-WebSocket-Accept header; got:\n{resp}"
+        );
+    }
+}

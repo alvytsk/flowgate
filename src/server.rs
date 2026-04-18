@@ -44,6 +44,14 @@ pub struct ServerHandle {
 impl ServerHandle {
     /// Signal the server to stop accepting new connections and wait for
     /// in-flight connections to complete (with a 30-second drain timeout).
+    ///
+    /// **Upgraded connections (WebSocket) are not tracked.** The task that
+    /// drives an upgraded connection is spawned detached on the tokio runtime
+    /// and survives `shutdown` — the drain timer ignores it. Applications
+    /// that need to close WebSocket sessions cleanly on shutdown should
+    /// broadcast their own shutdown signal via app state (for example a
+    /// `tokio::sync::broadcast::Sender`) and await session closure from
+    /// application code before calling `shutdown`.
     pub async fn shutdown(self) -> std::io::Result<()> {
         let _ = self.shutdown_tx.send(true);
         self.join_handle.await.map_err(std::io::Error::other)
@@ -291,7 +299,12 @@ async fn serve_one_connection<S, IO>(
         }
     });
 
-    if let Err(err) = builder.serve_connection(io, service).await {
+    // `.with_upgrades()` is required for HTTP Upgrade (e.g. WebSocket) to
+    // actually hand the socket off to the application — without it the
+    // 101 response is written but the connection is torn down before the
+    // spawned upgrade task can consume the raw socket.
+    let conn = builder.serve_connection(io, service).with_upgrades();
+    if let Err(err) = conn.await {
         let msg = err.to_string();
         if msg.contains("timeout") {
             tracing::debug!("connection timeout from {peer_addr}: {err}");

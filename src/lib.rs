@@ -16,6 +16,9 @@ pub mod sse;
 #[cfg(feature = "tls")]
 pub mod tls;
 
+#[cfg(feature = "ws")]
+pub mod ws;
+
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
@@ -47,6 +50,8 @@ pub use observer::{MetricsObserver, RequestEvent};
 pub use response::IntoResponse;
 pub use server::ServerHandle;
 pub use sse::{Event, Sse};
+#[cfg(feature = "ws")]
+pub use ws::{Message, WebSocket, WebSocketUpgrade, WsError};
 
 // OperationMeta: real type when openapi feature is on, zero-size stub when off.
 #[cfg(feature = "openapi")]
