@@ -40,7 +40,7 @@ impl TlsConfig {
         Ok(Self(Arc::new(config)))
     }
 
-    /// Wrap a pre-built rustls [`ServerConfig`].
+    /// Wrap a pre-built [`rustls::ServerConfig`].
     ///
     /// ALPN is forced to `["http/1.1"]` — v0.2 is HTTP/1-only. Any ALPN
     /// value the caller set on `config` is overwritten.

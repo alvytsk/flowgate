@@ -19,11 +19,7 @@ pub mod tls;
 #[cfg(feature = "ws")]
 pub mod ws;
 
-#[cfg(feature = "openapi")]
 pub mod openapi;
-
-#[cfg(not(feature = "openapi"))]
-pub mod openapi_stub;
 
 // Re-exports for ergonomic use
 pub use app::{App, AppMeta};
@@ -54,7 +50,9 @@ pub use sse::{Event, Sse};
 pub use ws::{Message, WebSocket, WebSocketUpgrade, WsError};
 
 // OperationMeta: real type when openapi feature is on, zero-size stub when off.
-#[cfg(feature = "openapi")]
-pub use openapi::meta::OperationMeta;
-#[cfg(not(feature = "openapi"))]
-pub use openapi_stub::OperationMeta;
+pub use openapi::OperationMeta;
+
+// Ergonomic re-exports from common upstream crates so users don't need parallel
+// `http` / `bytes` imports in their `Cargo.toml`.
+pub use bytes::Bytes;
+pub use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};

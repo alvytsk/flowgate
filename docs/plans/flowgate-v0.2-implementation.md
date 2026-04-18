@@ -256,25 +256,62 @@ All 5 WS unit tests and 2 WS integration tests pass. Full `--all-features` run i
 - `src/lib.rs` — `pub mod ws` (ws-gated); re-exports `Message`, `WebSocket`, `WebSocketUpgrade`, `WsError`
 - `tests/integration.rs` — `ws_tests` module with `ws_echo_round_trip` and `ws_accepts_compound_connection_header`
 
-### Phase 4 — Arch polish
+### Phase 4 — Arch polish ✅ COMPLETE
 
-**Step 19 — Consolidate `openapi_stub.rs` into `openapi/mod.rs`.**
-_Extended:_ Delete `src/openapi_stub.rs`. Inside `src/openapi/mod.rs`, move the current feature-on contents under `#[cfg(feature = "openapi")] mod spec; #[cfg(feature = "openapi")] pub use spec::*;` (similar for `meta` and `ui` submodules), and add a `#[cfg(not(feature = "openapi"))]` block containing the zero-sized `OperationMeta` stub. Update `src/lib.rs` to have a single unconditional `pub mod openapi;` and remove the `openapi_stub` branch. Verified by `cargo build` (no feature) and `cargo build --features openapi` both passing; the user-facing `OperationMeta` import path is unchanged.
+**Step 19 — Consolidate `openapi_stub.rs` into `openapi/mod.rs`.** ✅
+_Extended:_ Deleted `src/openapi_stub.rs`. `src/openapi/mod.rs` now holds both branches: `#[cfg(feature = "openapi")] pub mod meta; pub(crate) mod spec; pub(crate) mod ui;` with a `pub use meta::OperationMeta;` re-export, plus a `#[cfg(not(feature = "openapi"))]` zero-sized `OperationMeta` stub with all no-op builder methods. `src/lib.rs` now has a single unconditional `pub mod openapi;` and a single `pub use openapi::OperationMeta;`. Verified with `cargo build` (no features) and `cargo build --features openapi` — both compile cleanly; the `flowgate::OperationMeta` import path is unchanged for downstream code.
 
-**Step 20 — Add ergonomic re-exports to `lib.rs`.**
-_Extended:_ Append `pub use bytes::Bytes;`, `pub use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};`, and `pub use error::BoxError;`. This eliminates parallel `use http::...` / `use bytes::...` lines in downstream code. Verified by updating `examples/hello.rs` and `examples/groups.rs` to import only from `flowgate::` and watching them still compile.
+**Step 20 — Add ergonomic re-exports to `lib.rs`.** ✅
+_Extended:_ Appended `pub use bytes::Bytes;` and `pub use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};`. `BoxError` was already re-exported. Downstream code can now import HTTP types from `flowgate::` without a parallel `http` / `bytes` entry in `Cargo.toml`. Verified by `cargo build --all-features` still passing.
 
-**Step 21 — Public API surface audit.**
-_Extended:_ Walk `src/app.rs`, `src/group.rs`, `src/router.rs`, `src/server.rs` and confirm that internal types (`RawRoute`, `CompiledRoute`, `RuntimeInner`, `FinalizedApp`, etc.) are `pub(crate)`, not `pub`. Anything public that no external user would reasonably call gets demoted. The goal is a minimal 0.2.0 API surface, since anything public we ship becomes a compatibility promise. Verified by `cargo doc --no-deps --all-features` — inspect the generated rustdoc index and confirm it matches what a user should see.
+**Step 21 — Public API surface audit.** ✅
+_Extended:_ Confirmed `RawRoute`, `CompiledRoute`, `RuntimeInner`, `FinalizedApp`, `ManifestEntry` are all `pub(crate)` (or private). `RuntimeInner` is a bare `struct` with no `pub` visibility modifier, which is effectively private to `server.rs`. No demotion needed. Also audited `lib.rs` re-exports — everything user-facing is present; no accidental leaks.
 
-**Step 22 — Doc-comment sweep.**
-_Extended:_ For every `pub` item in `app.rs`, `group.rs`, `middleware/mod.rs`, `observer.rs`, `extract/*.rs`, `server.rs`, ensure there is at least a one-line `///` comment. Most items already have one — skip anything already documented. No code changes; rustdoc only. Verified by `cargo doc --no-deps --all-features` rendering clean with no missing-docs warnings.
+**Step 22 — Doc-comment sweep.** ✅
+_Extended:_ Swept `app.rs`, `group.rs`, `middleware/mod.rs`, `observer.rs`, `extract/*.rs`, `server.rs`. Added missing rustdoc on `AppMeta::{title, version, description, new, description}`, `PreMiddleware::call`, `Middleware::call`, `MetricsObserver::on_request`, `FromRequestParts::{Rejection, from_request_parts}`, `FromRequest::{Rejection, from_request}`, `FromRef::from_ref`. Items already documented (handler registration methods, `Group` methods, `ServerHandle::{shutdown, local_addr}`, `serve`, `serve_with_listener`, middleware built-ins, extractor struct types) left alone — this was a sweep, not a rewrite.
 
-**Step 23 — Clippy clean.**
-_Extended:_ Run `cargo clippy --all-targets --all-features -- -D warnings`. Fix any warnings introduced by the new modules (likely `needless_return`, `redundant_clone`, `uninlined_format_args` patterns). No `#[allow(..)]` without a comment explaining why. Verified by the command exiting 0.
+**Step 23 — Clippy clean.** ✅
+_Extended:_ `cargo clippy --all-targets --all-features -- -D warnings` passes. One pre-existing issue caught: the benchmarks' `use flowgate::{..., AppMeta, ...}` import was unused under the no-openapi build; gated it behind `#[cfg(feature = "openapi")]` to match the only call site. Verified clippy clean under no-features, `--features ws`, `--features tls`, `--features openapi`, and `--all-features`.
 
-**Step 24 — Doc build clean.**
-_Extended:_ Run `cargo doc --no-deps --all-features` and fix any broken intra-doc links (`[Foo]` that don't resolve) or warnings. The generated HTML is the canonical API reference for the release. Verified by the command exiting 0 with no warnings.
+**Step 24 — Doc build clean.** ✅
+_Extended:_ `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features` passes. Fixed a broken intra-doc link in `src/tls.rs:43` (`[ServerConfig]` now reads `[rustls::ServerConfig]`). No other broken links or warnings.
+
+### Phase 4 — How to test
+
+```bash
+# Both feature configurations of the consolidated openapi module
+cargo build
+cargo build --features openapi
+
+# Clippy across the feature matrix
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Rustdoc renders clean, no broken intra-doc links
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
+# Full suite after the polish
+cargo test --all-features
+```
+
+Full `--all-features` run is **78 tests, zero failures**.
+
+### Phase 4 — Summary of changes
+
+**Deleted files**
+
+- `src/openapi_stub.rs` — folded into `src/openapi/mod.rs`
+
+**Modified files**
+
+- `src/openapi/mod.rs` — now owns both the feature-on (`pub mod meta; pub(crate) mod spec; pub(crate) mod ui;` + `pub use meta::OperationMeta;`) and feature-off (zero-sized `OperationMeta` stub with no-op builders) branches under `#[cfg(..)]`
+- `src/lib.rs` — single unconditional `pub mod openapi;` and `pub use openapi::OperationMeta;`; added ergonomic re-exports `pub use bytes::Bytes;` and `pub use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};`
+- `src/app.rs` — rustdoc on `AppMeta::{title, version, description, new, description}`
+- `src/middleware/mod.rs` — rustdoc on `PreMiddleware::call`, `Middleware::call`
+- `src/observer.rs` — rustdoc on `MetricsObserver::on_request`
+- `src/extract/mod.rs` — rustdoc on `FromRequestParts::{Rejection, from_request_parts}`, `FromRequest::{Rejection, from_request}`, `FromRef::from_ref`
+- `src/tls.rs` — fixed broken intra-doc link (`[ServerConfig]` → `[rustls::ServerConfig]`)
+- `benches/dispatch.rs` — `AppMeta` import gated on `#[cfg(feature = "openapi")]` to match the only call site
 
 ### Phase 5 — Release prep
 

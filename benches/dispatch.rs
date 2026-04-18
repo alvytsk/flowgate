@@ -39,9 +39,10 @@ use tokio::runtime::Runtime;
 use flowgate::handler::BoxFuture;
 use flowgate::middleware::{Next, TracingMiddleware};
 use flowgate::{
-    App, AppMeta, Json, Middleware, Path, Request, RequestIdMiddleware, ServerConfig,
-    TimeoutMiddleware,
+    App, Json, Middleware, Path, Request, RequestIdMiddleware, ServerConfig, TimeoutMiddleware,
 };
+#[cfg(feature = "openapi")]
+use flowgate::AppMeta;
 
 // --- Counting global allocator ---------------------------------------------
 
