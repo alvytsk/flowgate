@@ -115,12 +115,7 @@ impl<S: Send + Sync + 'static> App<S> {
     }
 
     /// Register a route with a specific HTTP method.
-    pub fn route<H, T>(
-        mut self,
-        method: Method,
-        path: &str,
-        handler: H,
-    ) -> Result<Self, RouteError>
+    pub fn route<H, T>(mut self, method: Method, path: &str, handler: H) -> Result<Self, RouteError>
     where
         H: Handler<T, S> + Send + Sync + 'static,
         T: Send + 'static,
@@ -499,9 +494,7 @@ fn register_openapi_routes<S: Send + Sync + 'static>(
     let spec_json = generate_spec(meta, manifest);
     // Share the serialized spec across every `/openapi.json` request via
     // `Bytes` — clones are Arc increments, not O(n) buffer copies.
-    let spec_bytes = bytes::Bytes::from(
-        serde_json::to_vec_pretty(&spec_json).unwrap_or_default(),
-    );
+    let spec_bytes = bytes::Bytes::from(serde_json::to_vec_pretty(&spec_json).unwrap_or_default());
 
     // GET /openapi.json — serves the spec as JSON.
     let openapi_handler = move || {

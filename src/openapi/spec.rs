@@ -3,10 +3,7 @@ use serde_json::{json, Map, Value};
 use crate::app::{AppMeta, ManifestEntry};
 
 /// Generate an OpenAPI 3.1.0 JSON document from app metadata and routes.
-pub(crate) fn generate_spec(
-    meta: &Option<AppMeta>,
-    routes: &[ManifestEntry],
-) -> Value {
+pub(crate) fn generate_spec(meta: &Option<AppMeta>, routes: &[ManifestEntry]) -> Value {
     let info = match meta {
         Some(m) => {
             let mut info = json!({
@@ -32,9 +29,7 @@ pub(crate) fn generate_spec(
 
         let operation = build_operation(route);
 
-        let path_item = paths
-            .entry(path.clone())
-            .or_insert_with(|| json!({}));
+        let path_item = paths.entry(path.clone()).or_insert_with(|| json!({}));
         path_item[method] = operation;
     }
 

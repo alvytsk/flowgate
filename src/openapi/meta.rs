@@ -213,21 +213,40 @@ pub struct SchemaObject {
 
 impl SchemaObject {
     pub fn string() -> Self {
-        Self { schema_type: Some("string".into()), ..Default::default() }
+        Self {
+            schema_type: Some("string".into()),
+            ..Default::default()
+        }
     }
     pub fn integer() -> Self {
-        Self { schema_type: Some("integer".into()), ..Default::default() }
+        Self {
+            schema_type: Some("integer".into()),
+            ..Default::default()
+        }
     }
     pub fn number() -> Self {
-        Self { schema_type: Some("number".into()), ..Default::default() }
+        Self {
+            schema_type: Some("number".into()),
+            ..Default::default()
+        }
     }
     pub fn boolean() -> Self {
-        Self { schema_type: Some("boolean".into()), ..Default::default() }
+        Self {
+            schema_type: Some("boolean".into()),
+            ..Default::default()
+        }
     }
     pub fn array(items: SchemaObject) -> Self {
-        Self { schema_type: Some("array".into()), items: Some(Box::new(items)), ..Default::default() }
+        Self {
+            schema_type: Some("array".into()),
+            items: Some(Box::new(items)),
+            ..Default::default()
+        }
     }
     pub fn object() -> Self {
-        Self { schema_type: Some("object".into()), ..Default::default() }
+        Self {
+            schema_type: Some("object".into()),
+            ..Default::default()
+        }
     }
 }

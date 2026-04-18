@@ -1,8 +1,8 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use http::StatusCode;
 use futures_util::FutureExt;
+use http::StatusCode;
 
 use crate::body::{full, Request};
 use crate::handler::BoxFuture;
@@ -21,10 +21,7 @@ pub struct RecoverMiddleware;
 impl<S: Send + Sync + 'static> Middleware<S> for RecoverMiddleware {
     fn call(&self, req: Request, state: Arc<S>, next: Next<S>) -> BoxFuture {
         Box::pin(async move {
-            match AssertUnwindSafe(next.run(req, state))
-                .catch_unwind()
-                .await
-            {
+            match AssertUnwindSafe(next.run(req, state)).catch_unwind().await {
                 Ok(response) => response,
                 Err(_panic) => {
                     tracing::error!("handler panicked — recovered");
