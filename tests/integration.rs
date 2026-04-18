@@ -108,12 +108,10 @@ async fn state_extraction() {
     let req = http::Request::builder().uri("/").body(()).unwrap();
     let (mut parts, _) = req.into_parts();
 
-    let State(name): State<String> =
-        State::from_request_parts(&mut parts, &state).await.unwrap();
+    let State(name): State<String> = State::from_request_parts(&mut parts, &state).await.unwrap();
     assert_eq!(name, "test");
 
-    let State(count): State<u32> =
-        State::from_request_parts(&mut parts, &state).await.unwrap();
+    let State(count): State<u32> = State::from_request_parts(&mut parts, &state).await.unwrap();
     assert_eq!(count, 42);
 }
 
@@ -141,7 +139,10 @@ fn request_context_clone() {
     };
     let cloned = ctx.clone();
     assert_eq!(cloned.body_limit, 1024);
-    assert_eq!(cloned.body_read_timeout, Some(std::time::Duration::from_secs(5)));
+    assert_eq!(
+        cloned.body_read_timeout,
+        Some(std::time::Duration::from_secs(5))
+    );
     assert_eq!(cloned.route_params.0.len(), 1);
 }
 
@@ -248,7 +249,10 @@ async fn path_single_string() {
     use flowgate::context::{RequestContext, RouteParams};
     use flowgate::extract::FromRequestParts;
 
-    let req = http::Request::builder().uri("/users/alice").body(()).unwrap();
+    let req = http::Request::builder()
+        .uri("/users/alice")
+        .body(())
+        .unwrap();
     let (mut parts, _) = req.into_parts();
     parts.extensions.insert(RequestContext {
         route_params: RouteParams(vec![("name".into(), "alice".into())]),
@@ -446,12 +450,17 @@ async fn http_request_with_headers(
     path: &str,
     body: Option<&str>,
     extra_headers: &[(&str, &str)],
-) -> (StatusCode, std::collections::HashMap<String, String>, String) {
+) -> (
+    StatusCode,
+    std::collections::HashMap<String, String>,
+    String,
+) {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let io = hyper_util::rt::TokioIo::new(stream);
 
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .unwrap();
     tokio::spawn(conn);
 
     let req_body = match body {
@@ -559,7 +568,9 @@ async fn round_trip_state_extraction() {
         })
     }
 
-    let app = App::with_state(Counter { value: 99 }).get("/count", get_count).unwrap();
+    let app = App::with_state(Counter { value: 99 })
+        .get("/count", get_count)
+        .unwrap();
     let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/count", None).await;
@@ -655,8 +666,7 @@ async fn round_trip_path_and_json() {
     let app = App::new().put("/users/{id}", update_user).unwrap();
     let (addr, _handle) = serve_app(app).await;
 
-    let (status, body) =
-        http_request(addr, "PUT", "/users/7", Some(r#"{"name":"alice"}"#)).await;
+    let (status, body) = http_request(addr, "PUT", "/users/7", Some(r#"{"name":"alice"}"#)).await;
     assert_eq!(status, StatusCode::OK);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(parsed["id"], 7);
@@ -728,7 +738,10 @@ async fn round_trip_head_on_get_route() {
     let (status, headers, body) = http_request_with_headers(addr, "HEAD", "/page", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_empty(), "HEAD response body must be empty");
-    assert_eq!(headers.get("content-type").unwrap(), "text/plain; charset=utf-8");
+    assert_eq!(
+        headers.get("content-type").unwrap(),
+        "text/plain; charset=utf-8"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -747,7 +760,9 @@ async fn round_trip_head_no_get_route() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn round_trip_head_nonexistent_route() {
-    async fn handler() -> &'static str { "ok" }
+    async fn handler() -> &'static str {
+        "ok"
+    }
 
     let app = App::new().get("/exists", handler).unwrap();
     let (addr, _handle) = serve_app(app).await;
@@ -758,12 +773,15 @@ async fn round_trip_head_nonexistent_route() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn round_trip_405_allow_header_includes_head() {
-    async fn handler() -> &'static str { "ok" }
+    async fn handler() -> &'static str {
+        "ok"
+    }
 
     let app = App::new().get("/item", handler).unwrap();
     let (addr, _handle) = serve_app(app).await;
 
-    let (status, headers, _body) = http_request_with_headers(addr, "DELETE", "/item", None, &[]).await;
+    let (status, headers, _body) =
+        http_request_with_headers(addr, "DELETE", "/item", None, &[]).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     let allow = headers.get("allow").unwrap();
     assert!(allow.contains("GET"), "Allow header should contain GET");
@@ -853,9 +871,9 @@ async fn round_trip_404_still_works() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn round_trip_middleware_ordering() {
-    use std::sync::Mutex;
     use flowgate::handler::BoxFuture;
     use flowgate::middleware::{Middleware, Next};
+    use std::sync::Mutex;
 
     #[derive(Clone)]
     struct Order(std::sync::Arc<Mutex<Vec<&'static str>>>);
@@ -964,8 +982,7 @@ async fn round_trip_three_extractors() {
         .unwrap();
     let (addr, _handle) = serve_app(app).await;
 
-    let (status, body) =
-        http_request(addr, "POST", "/items/5", Some(r#"{"value":"hello"}"#)).await;
+    let (status, body) = http_request(addr, "POST", "/items/5", Some(r#"{"value":"hello"}"#)).await;
     assert_eq!(status, StatusCode::OK);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(parsed["result"], "pfx-5-hello");
@@ -975,9 +992,9 @@ async fn round_trip_three_extractors() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn round_trip_pre_middleware_ordering() {
-    use std::sync::Mutex;
     use flowgate::handler::BoxFuture;
     use flowgate::middleware::{Middleware, Next, PreMiddleware, PreNext};
+    use std::sync::Mutex;
 
     #[derive(Clone)]
     struct Order(std::sync::Arc<Mutex<Vec<&'static str>>>);
@@ -1061,10 +1078,7 @@ async fn round_trip_pre_middleware_short_circuit() {
         "should not reach"
     }
 
-    let app = App::new()
-        .pre(BlockPre)
-        .get("/secret", handler)
-        .unwrap();
+    let app = App::new().pre(BlockPre).get("/secret", handler).unwrap();
     let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/secret", None).await;
@@ -1076,9 +1090,9 @@ async fn round_trip_pre_middleware_short_circuit() {
 async fn round_trip_layer_after_route_still_applies() {
     // Verifies that builder order doesn't matter: .layer() after .get()
     // still applies the middleware to the route (finalization merges them).
-    use std::sync::Mutex;
     use flowgate::handler::BoxFuture;
     use flowgate::middleware::{Middleware, Next};
+    use std::sync::Mutex;
 
     #[derive(Clone)]
     struct Log(std::sync::Arc<Mutex<Vec<&'static str>>>);
@@ -1133,11 +1147,7 @@ async fn round_trip_group_basic() {
     let app = App::new()
         .get("/health", health)
         .unwrap()
-        .group(
-            Group::new("/api")
-                .get("/users", list_users)
-                .unwrap(),
-        );
+        .group(Group::new("/api").get("/users", list_users).unwrap());
     let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/health", None).await;
@@ -1158,17 +1168,12 @@ async fn round_trip_nested_groups() {
         "users"
     }
 
-    let app = App::new()
-        .group(
-            Group::new("/api")
-                .get("/users", users)
-                .unwrap()
-                .group(
-                    Group::new("/admin")
-                        .get("/stats", stats)
-                        .unwrap(),
-                ),
-        );
+    let app = App::new().group(
+        Group::new("/api")
+            .get("/users", users)
+            .unwrap()
+            .group(Group::new("/admin").get("/stats", stats).unwrap()),
+    );
     let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/api/users", None).await;
@@ -1186,9 +1191,9 @@ async fn round_trip_nested_groups() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn round_trip_group_middleware_inheritance() {
-    use std::sync::Mutex;
     use flowgate::handler::BoxFuture;
     use flowgate::middleware::{Middleware, Next};
+    use std::sync::Mutex;
 
     #[derive(Clone)]
     struct Log(std::sync::Arc<Mutex<Vec<&'static str>>>);
@@ -1219,14 +1224,12 @@ async fn round_trip_group_middleware_inheritance() {
     // App middleware + group middleware should both apply.
     // Group middleware is route-local, app middleware is global.
     // Final order: app_mw → group_mw → handler
-    let app = App::with_state(log.clone())
-        .layer(TagMw("app"))
-        .group(
-            Group::new("/api")
-                .layer(TagMw("group"))
-                .get("/test", handler)
-                .unwrap(),
-        );
+    let app = App::with_state(log.clone()).layer(TagMw("app")).group(
+        Group::new("/api")
+            .layer(TagMw("group"))
+            .get("/test", handler)
+            .unwrap(),
+    );
     let (addr, _handle) = serve_app(app).await;
 
     let (status, _) = http_request(addr, "GET", "/api/test", None).await;
@@ -1242,11 +1245,7 @@ async fn round_trip_group_with_path_params() {
         format!("user-{id}")
     }
 
-    let app = App::new().group(
-        Group::new("/api/v1")
-            .get("/users/{id}", get_user)
-            .unwrap(),
-    );
+    let app = App::new().group(Group::new("/api/v1").get("/users/{id}", get_user).unwrap());
     let (addr, _handle) = serve_app(app).await;
 
     let (status, body) = http_request(addr, "GET", "/api/v1/users/42", None).await;
@@ -1258,7 +1257,9 @@ async fn round_trip_group_with_path_params() {
 
 #[test]
 fn group_route_rejects_invalid_path() {
-    async fn handler() -> &'static str { "ok" }
+    async fn handler() -> &'static str {
+        "ok"
+    }
 
     let result: Result<Group<()>, _> = Group::new("/api").get("users", handler);
     let err = result.err().expect("expected error for invalid path");
@@ -1267,7 +1268,9 @@ fn group_route_rejects_invalid_path() {
 
 #[test]
 fn group_route_accepts_empty_path() {
-    async fn handler() -> &'static str { "ok" }
+    async fn handler() -> &'static str {
+        "ok"
+    }
 
     let result: Result<Group<()>, _> = Group::new("/api").route(http::Method::GET, "", handler);
     assert!(result.is_ok());
@@ -1338,14 +1341,9 @@ async fn round_trip_request_id_extractor() {
         .unwrap();
     let (addr, _handle) = serve_app(app).await;
 
-    let (status, headers, body) = http_request_with_headers(
-        addr,
-        "GET",
-        "/test",
-        None,
-        &[("x-request-id", "test-123")],
-    )
-    .await;
+    let (status, headers, body) =
+        http_request_with_headers(addr, "GET", "/test", None, &[("x-request-id", "test-123")])
+            .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "test-123");
     assert_eq!(headers["x-request-id"], "test-123");
@@ -1388,9 +1386,7 @@ async fn round_trip_openapi_json() {
         .get_with(
             "/health",
             health,
-            OperationMeta::new()
-                .summary("Health check")
-                .tag("ops"),
+            OperationMeta::new().summary("Health check").tag("ops"),
         )
         .unwrap()
         .with_openapi();
@@ -1415,15 +1411,11 @@ async fn round_trip_openapi_docs_html() {
         "ok"
     }
 
-    let app = App::new()
-        .get("/test", handler)
-        .unwrap()
-        .with_openapi();
+    let app = App::new().get("/test", handler).unwrap().with_openapi();
     let (addr, _handle) = serve_app(app).await;
 
     // /docs should return HTML.
-    let (status, headers, body) =
-        http_request_with_headers(addr, "GET", "/docs", None, &[]).await;
+    let (status, headers, body) = http_request_with_headers(addr, "GET", "/docs", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert!(headers["content-type"].contains("text/html"));
     assert!(body.contains("api-reference"));
@@ -1437,10 +1429,7 @@ async fn openapi_route_conflict_detected() {
     }
 
     // User registers /docs — should conflict with OpenAPI docs route.
-    let app = App::new()
-        .get("/docs", handler)
-        .unwrap()
-        .with_openapi();
+    let app = App::new().get("/docs", handler).unwrap().with_openapi();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let config = ServerConfig::new().enable_default_tracing(false);
@@ -1636,10 +1625,15 @@ async fn round_trip_body_read_timeout_stall_returns_408() {
 
     // Server should respond inside the 150 ms timeout (with headroom for CI).
     let mut buf = Vec::with_capacity(1024);
-    let read =
-        tokio::time::timeout(std::time::Duration::from_secs(2), stream.read_to_end(&mut buf))
-            .await;
-    assert!(read.is_ok(), "server did not respond within 2s (no timeout fired)");
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_to_end(&mut buf),
+    )
+    .await;
+    assert!(
+        read.is_ok(),
+        "server did not respond within 2s (no timeout fired)"
+    );
     read.unwrap().unwrap();
 
     let response = String::from_utf8_lossy(&buf);
@@ -1665,7 +1659,9 @@ async fn round_trip_body_read_timeout_fast_body_succeeds() {
     }
 
     async fn double(Json(input): Json<Payload>) -> Json<Out> {
-        Json(Out { doubled: input.x * 2 })
+        Json(Out {
+            doubled: input.x * 2,
+        })
     }
 
     let app = App::new().post("/double", double).unwrap();

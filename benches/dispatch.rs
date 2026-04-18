@@ -372,17 +372,17 @@ fn bench_openapi_json_large(c: &mut Criterion) {
         items: Some(Box::new(user.clone())),
         ..Default::default()
     };
-    let create_user_body = obj(
-        &[("name", s_str()), ("email", s_str())],
-        &["name", "email"],
-    );
+    let create_user_body = obj(&[("name", s_str()), ("email", s_str())], &["name", "email"]);
     let update_user_body = obj(&[("name", s_str()), ("email", s_str())], &[]);
 
     let device = obj(
         &[
             ("id", s_int()),
             ("serial", s_str()),
-            ("status", json!({"type": "string", "enum": ["online","offline","degraded"]})),
+            (
+                "status",
+                json!({"type": "string", "enum": ["online","offline","degraded"]}),
+            ),
             ("firmware", s_str()),
             ("last_seen", s_dt()),
         ],
@@ -393,14 +393,14 @@ fn bench_openapi_json_large(c: &mut Criterion) {
         items: Some(Box::new(device.clone())),
         ..Default::default()
     };
-    let create_device_body = obj(
-        &[("serial", s_str()), ("firmware", s_str())],
-        &["serial"],
-    );
+    let create_device_body = obj(&[("serial", s_str()), ("firmware", s_str())], &["serial"]);
     let update_device_body = obj(
         &[
             ("firmware", s_str()),
-            ("status", json!({"type": "string", "enum": ["online","offline","degraded"]})),
+            (
+                "status",
+                json!({"type": "string", "enum": ["online","offline","degraded"]}),
+            ),
         ],
         &[],
     );
@@ -438,7 +438,10 @@ fn bench_openapi_json_large(c: &mut Criterion) {
             ("id", s_int()),
             ("device_id", s_int()),
             ("kind", s_str()),
-            ("severity", json!({"type": "string", "enum": ["info","warning","error"]})),
+            (
+                "severity",
+                json!({"type": "string", "enum": ["info","warning","error"]}),
+            ),
             ("message", s_str()),
             ("occurred_at", s_dt()),
             ("acknowledged", s_bool()),
@@ -504,10 +507,7 @@ fn bench_openapi_json_large(c: &mut Criterion) {
                 .tag("users")
                 .param(page_param())
                 .param(per_page_param())
-                .param(
-                    ParamMeta::query("status")
-                        .description("Filter: active or inactive"),
-                )
+                .param(ParamMeta::query("status").description("Filter: active or inactive"))
                 .response_with_schema(200, "Users page", user_list.clone())
                 .response_with_schema(400, "Invalid query parameters", error_schema.clone()),
         )
@@ -870,7 +870,11 @@ fn bench_openapi_json_large(c: &mut Criterion) {
                     200,
                     "Version",
                     obj(
-                        &[("version", s_str()), ("commit", s_str()), ("built_at", s_dt())],
+                        &[
+                            ("version", s_str()),
+                            ("commit", s_str()),
+                            ("built_at", s_dt()),
+                        ],
                         &["version"],
                     ),
                 ),

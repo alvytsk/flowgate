@@ -105,8 +105,15 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
             let router = router_for_dispatch.clone();
             let observers = observers_for_dispatch.clone();
             Box::pin(async move {
-                dispatch_request(&router, body_limit, body_read_timeout, &observers, req, state)
-                    .await
+                dispatch_request(
+                    &router,
+                    body_limit,
+                    body_read_timeout,
+                    &observers,
+                    req,
+                    state,
+                )
+                .await
             })
         });
 
@@ -334,8 +341,7 @@ async fn dispatch_request<S: Send + Sync + 'static>(
                     .map(|m| m.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                let mut res =
-                    http::Response::new(crate::body::full("method not allowed"));
+                let mut res = http::Response::new(crate::body::full("method not allowed"));
                 *res.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
                 res.headers_mut().insert(
                     http::header::ALLOW,

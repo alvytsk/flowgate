@@ -55,7 +55,8 @@ impl<S: Send + Sync + 'static> Router<S> {
     /// Return HTTP methods that have a route matching the given path.
     /// Automatically includes HEAD when GET is present.
     pub fn allowed_methods(&self, path: &str) -> Vec<Method> {
-        let mut methods: Vec<Method> = self.routes
+        let mut methods: Vec<Method> = self
+            .routes
             .iter()
             .filter(|(_, router)| router.at(path).is_ok())
             .map(|(method, _)| method.clone())
