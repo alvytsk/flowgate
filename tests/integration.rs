@@ -1835,3 +1835,101 @@ mod tls_tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 }
+
+// --- SSE tests ---
+
+mod sse_tests {
+    use super::*;
+    use flowgate::sse::{Event, Sse};
+    use futures_core::Stream;
+    use futures_util::stream;
+    use http_body_util::Empty;
+    use hyper_util::rt::TokioIo;
+    use std::time::Duration;
+
+    async fn three_events() -> Sse<impl Stream<Item = Event>> {
+        let events = stream::iter([
+            Event::default().data("one"),
+            Event::default().data("two"),
+            Event::default().data("three"),
+        ]);
+        Sse::new(events)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sse_stream_emits_events() {
+        let app = App::new().get("/events", three_events).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/events")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(
+            res.headers().get(http::header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+        assert_eq!(res.headers().get("x-accel-buffering").unwrap(), "no");
+
+        let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+        assert_eq!(body, "data: one\n\ndata: two\n\ndata: three\n\n");
+    }
+
+    async fn pending_with_heartbeat() -> Sse<impl Stream<Item = Event>> {
+        // Stream that never yields an event — only heartbeat frames drive the body.
+        let never: stream::Pending<Event> = stream::pending();
+        Sse::new(never).keep_alive(Duration::from_millis(30))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sse_heartbeat_frames_are_emitted() {
+        let app = App::new().get("/events", pending_with_heartbeat).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/events")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let mut body = res.into_body();
+        let read = tokio::time::timeout(Duration::from_secs(2), async {
+            let frame = body.frame().await.unwrap().unwrap();
+            frame.into_data().ok().unwrap()
+        })
+        .await
+        .expect("heartbeat did not arrive within 2s");
+
+        assert_eq!(&read[..], b":\n\n");
+    }
+}

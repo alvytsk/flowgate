@@ -293,6 +293,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "criterion",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",

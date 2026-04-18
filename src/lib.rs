@@ -11,6 +11,7 @@ pub mod observer;
 pub mod response;
 pub mod router;
 pub mod server;
+pub mod sse;
 
 #[cfg(feature = "tls")]
 pub mod tls;
@@ -45,6 +46,7 @@ pub use middleware::PreMiddleware;
 pub use observer::{MetricsObserver, RequestEvent};
 pub use response::IntoResponse;
 pub use server::ServerHandle;
+pub use sse::{Event, Sse};
 
 // OperationMeta: real type when openapi feature is on, zero-size stub when off.
 #[cfg(feature = "openapi")]

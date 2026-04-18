@@ -149,19 +149,54 @@ All 4 unit tests and 2 integration tests pass; the full `--all-features` run is 
 - `src/server.rs` — extracted `serve_one_connection<S, IO>` helper generic over IO, wired a TLS branch that `TlsAcceptor::accept`s inside the per-connection spawn before handing to hyper
 - `tests/integration.rs` — `tls_tests` module with `tls_round_trip_https` and `tls_from_pem_files_round_trip`
 
-### Phase 2 — SSE (always on)
+### Phase 2 — SSE (always on) ✅ COMPLETE
 
-**Step 8 — Add `body::stream()` helper.**
-_Extended:_ In `src/body.rs`, add `pub fn stream<S, E>(s: S) -> ResponseBody where S: Stream<Item = Result<Bytes, E>> + Send + 'static, E: Into<BoxError>`. Implementation maps each item into `Result<Frame<Bytes>, BoxError>` via `Frame::data(..)` and `Into::into`, then wraps with `StreamBody::new(..).boxed()`. The public surface stays on `Bytes` — trailers and raw-frame control are not exposed in v0.2; if needed later, a `frames_stream()` companion can be added without breaking this one. Verified by a unit test that creates a vec-backed stream and reads the body back through `BodyExt::collect`.
+**Step 8 — Add `body::stream()` helper.** ✅
+_Extended:_ In `src/body.rs`, added `pub fn stream<S, E>(s: S) -> ResponseBody where S: Stream<Item = Result<Bytes, E>> + Send + 'static, E: Into<BoxError>`. Each item is mapped into `Result<Frame<Bytes>, BoxError>` via `Frame::data(..)` + `Into::into`, then wrapped in `StreamBody::new(..).boxed_unsync()`. Companion change: `ResponseBody` is now `UnsyncBoxBody<Bytes, BoxError>` (was `BoxBody<Bytes, Infallible>`). Unsync is needed because streaming bodies spawned from async user code are almost never `Sync`; hyper requires only `Send`. `full()` and `empty()` use the same type via `Full::new(..).map_err(|i: Infallible| match i {}).boxed_unsync()`. Trailers and raw-frame control are out of scope for v0.2 — a `frames_stream()` companion can be added later without breaking this one.
 
-**Step 9 — Build the SSE module (`src/sse.rs`).**
-_Extended:_ Unconditional (no feature gate). `Event` is a plain struct with builder methods `data(impl Into<String>)`, `event(impl Into<String>)`, `id(impl Into<String>)`, `retry(Duration)`, and an internal `to_bytes()` that produces the wire representation (each field on its own `key: value\n` line, terminated with a blank line). `Sse<S>` holds `{ stream: S, keep_alive: Option<Duration> }`, with `Sse::new(stream)` and `Sse::keep_alive(Duration)` builder methods. The `IntoResponse` impl sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`; if `keep_alive` is `Some`, it builds a second stream from `tokio::time::interval` that emits the bytes `":\n\n"` (SSE comment — ignored by clients but keeps the socket warm for proxies), and merges the two via `futures_util::stream::select`. Final body goes through `body::stream()`. Verified by step 11.
+**Step 9 — Build the SSE module (`src/sse.rs`).** ✅
+_Extended:_ Unconditional module, no feature gate. `Event` is a plain struct with chainable builders `data`, `event`, `id`, `retry(Duration)`; `to_bytes()` produces the wire representation (multiline values produce multiple `key: value\n` lines, terminated by a blank line). `Sse<S>` holds `{ stream, keep_alive: Option<Duration> }`, with `Sse::new(stream)` and `.keep_alive(Duration)` builder methods. The `IntoResponse` impl sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`. When `keep_alive` is `Some`, a custom `SseStream` combinator polls user events first and interleaves heartbeat comment frames (`:\n\n`) on every tick — **crucially, the response ends as soon as the user stream ends**; heartbeat alone cannot keep the connection open. Final body goes through `body::stream()`. Four unit tests cover single-line, multiline, full-field, and empty-event serialization.
 
-**Step 10 — Build `examples/sse.rs`.**
-_Extended:_ Handler returns `Sse::new(stream).keep_alive(Duration::from_secs(15))` where `stream` is built from `tokio::time::interval(Duration::from_secs(1))` mapped to `Event::default().data(format!("tick {n}"))`. Doc-comment notes `curl -N http://localhost:8080/events` as the manual smoke test. Verified by `cargo run --example sse` + curl.
+**Step 10 — Build `examples/sse.rs`.** ✅
+_Extended:_ Handler returns `Sse::new(ticker.boxed()).keep_alive(Duration::from_secs(15))` where `ticker` is a `stream::unfold` that sleeps 1 second, yields `Event::default().id(n).data(format!("tick {n}"))`, and repeats. Doc-comment notes `curl -N http://localhost:8080/events` as the manual smoke test.
 
-**Step 11 — Add SSE integration test.**
-_Extended:_ `sse_stream_emits_events` in `tests/integration.rs`. Binds a random port, registers an `/events` handler that emits three known events and stops (finite stream), builds an HTTP client, reads the response body in chunks, and asserts: response status 200; `Content-Type: text/event-stream`; body contains three `data:` lines with the expected payloads. A second variant test uses a keep-alive interval of 50ms and confirms at least one heartbeat (`:\n\n`) arrives between events. Verified by `cargo test`.
+**Step 11 — Add SSE integration tests.** ✅
+_Extended:_ Two tests in `tests/integration.rs::sse_tests`. `sse_stream_emits_events` registers a finite 3-element `stream::iter` stream, makes a request, and asserts status 200, all three content-type-style headers (`text/event-stream`, `no-cache`, `x-accel-buffering: no`), and the full concatenated body `"data: one\n\ndata: two\n\ndata: three\n\n"`. `sse_heartbeat_frames_are_emitted` uses `stream::pending::<Event>()` with a 30ms keep-alive interval, reads exactly one body frame with a 2-second timeout, and asserts it equals `":\n\n"`. Both pass on every test run.
+
+### Phase 2 — How to test
+
+```bash
+# Unit tests (Event wire-format serialization)
+cargo test --lib sse::
+
+# Integration round-trips (full HTTP + body read)
+cargo test --test integration sse_tests
+
+# Full suite (all features including SSE + TLS)
+cargo test --all-features
+
+# Manual smoke test against the example
+cargo run --example sse
+# (in another terminal)
+curl -N http://localhost:8080/events
+# expected: one "id: N / data: tick N" pair per second, forever
+```
+
+All 4 SSE unit tests and 2 SSE integration tests pass; the full `--all-features` run is now 76 tests, zero failures. Clippy is clean at `-D warnings`.
+
+### Phase 2 — Summary of changes
+
+**New files**
+
+- `src/sse.rs` — `Event` + builder, `Sse<S>` wrapper with `keep_alive(Duration)`, `IntoResponse for Sse<S>`, custom `SseStream` combinator that terminates on event-stream end, heartbeat stream built on `tokio::time::Interval`, 4 unit tests
+- `examples/sse.rs` — `/events` endpoint emitting one tick/sec with `id:` and `data:` fields, 15s keep-alive
+
+**Modified files**
+
+- `Cargo.toml` — `futures-core` and `futures-util` are now unconditional (dropped the `recover` gate on `futures-util`; the `recover` feature itself still exists but is empty since all gated code already used `futures_util` which is now always available); added `[[example]] sse`
+- `src/body.rs` — `ResponseBody` is now `UnsyncBoxBody<Bytes, BoxError>`; added `pub fn stream<S, E>(...)` streaming-body helper; `full()` and `empty()` updated to match the new type
+- `src/lib.rs` — `pub mod sse` (unconditional); re-exports `Event` and `Sse`
+- `tests/integration.rs` — new `sse_tests` module with `sse_stream_emits_events` and `sse_heartbeat_frames_are_emitted`
 
 ### Phase 3 — WebSocket (`ws` feature)
 
