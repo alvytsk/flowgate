@@ -313,22 +313,76 @@ Full `--all-features` run is **78 tests, zero failures**.
 - `src/tls.rs` — fixed broken intra-doc link (`[ServerConfig]` → `[rustls::ServerConfig]`)
 - `benches/dispatch.rs` — `AppMeta` import gated on `#[cfg(feature = "openapi")]` to match the only call site
 
-### Phase 5 — Release prep
+### Phase 5 — Release prep ✅ COMPLETE
 
-**Step 25 — Bump `Cargo.toml` version to `0.2.0`.**
-_Extended:_ Single-line change. Resolves the `README.md` / `Cargo.toml` version mismatch, which is the main blocker for publication. Verified by `cargo build` and `cargo package --allow-dirty` both passing.
+**Step 25 — Bump `Cargo.toml` version to `0.2.0`.** ✅
+_Extended:_ Single-line change in `Cargo.toml:3`. Resolved the `README.md` / `Cargo.toml` version mismatch that was the main blocker for publication. Also added `repository = "https://github.com/alvytsk/flowgate"` and `readme = "README.md"` so `cargo package` emits zero metadata warnings. Verified by `cargo build` and `cargo package --allow-dirty` both passing.
 
-**Step 26 — Write `CHANGELOG.md`.**
-_Extended:_ New file at repo root. `## 0.2.0 - <date>` entry lists everything landed since 0.1.0, grouped under `Added` (router groups, OpenAPI + Scalar UI, benchmarks, MetricsObserver, pre-routing middleware, RequestId / Timeout / Recover middleware, Path / Query / RequestId extractors, graceful shutdown, PATCH / OPTIONS methods, body-read timeout, TLS, SSE, WebSocket, ergonomic re-exports), `Changed` (consolidated openapi module; `body::stream` helper), and `Deferred` (static files → 0.2.x, Tower adapter / HTTP/2 / workspace split → 0.3). Follows Keep-a-Changelog conventions. Verified by manual read-through.
+**Step 26 — Write `CHANGELOG.md`.** ✅
+_Extended:_ Replaced the previous `[Unreleased]` block with a fully-fleshed `## [0.2.0] - 2026-04-19` entry. Top-of-section narrative groups the work into "Highlights", per-feature deep dives (TLS, WebSocket, SSE, body-read timeout, metrics observer, per-request alloc reductions with a before/after table), then the Keep-a-Changelog `Added` / `Changed` / `Internal` / `Deferred` / `Tests` sections. Stub `## [0.1.0] - 2025-12-13` entry added at the bottom with comparison links (`v0.1.0...v0.2.0`). Each individual user-facing feature is mentioned at least twice — once in narrative form and once in the structured `Added` list — so changelog readers can either skim or drill in.
 
-**Step 27 — Update `docs/architecture.md`.**
-_Extended:_ Add four subsections: "TLS wiring" (where the acceptor lives in the accept-loop flow), "Streaming response bodies" (the `body::stream` primitive and its relationship to `BoxBody`), "WebSocket upgrade flow" (extractor → 101 response → detached task), and "Graceful shutdown and upgraded connections" (the explicit carve-out). Refresh the dependency table. Verified by manual read-through.
+**Step 27 — Update `docs/architecture.md`.** ✅
+_Extended:_ Added four new subsections after "Metrics observer hook":
+- **TLS wiring** — accept-loop ASCII flow diagram, where `TlsAcceptor` is built (once, outside the loop) and where it runs (inside the per-connection task), handshake-failure semantics, ALPN pinning rationale.
+- **Streaming response bodies** — explains the move from `BoxBody<Bytes, Infallible>` to `UnsyncBoxBody<Bytes, BoxError>`, why `Unsync` is mandatory for streams from async user code, the three `body::*` constructors, and why trailers are deferred.
+- **WebSocket upgrade flow** — header validation, the `Sec-WebSocket-Accept` computation, the 101-response → detached-task handoff, and the **critical** `.with_upgrades()` requirement on the hyper connection driver.
+- **Graceful shutdown and upgraded connections** — the WebSocket carve-out, why `drain` does not wait for upgraded tasks (embedded-friendliness), and the recommended `tokio::sync::broadcast::Sender` pattern for application-coordinated session closure.
 
-**Step 28 — Update `README.md`.**
-_Extended:_ Three new code snippets (minimal TLS setup with `from_pem_files`, SSE counter endpoint with keep-alive, WebSocket echo handler). Update the feature-flag table to reflect all live flags. Bump the install snippet to `flowgate = "0.2.0"`. Verified by manual read-through and rendering the README via `cargo doc --open` if README is linked.
+Refreshed the dependency table — split into "Required (always built)" / "Feature-gated" / "Dev-only" with explicit Crate × Feature × Purpose columns; added all the new crates pulled in for v0.2 (`tokio-rustls`, `rustls`, `rustls-pemfile`, `rcgen`, `tokio-tungstenite`, `sha1`, `base64`, `futures-core`, `webpki-roots`, `tempfile`). Updated the layer-architecture diagram to mention `tls.rs`, `sse.rs`, `ws.rs`, and `BoxError`.
 
-**Step 29 — `cargo package` dry-run.**
-_Extended:_ Run `cargo package --allow-dirty` and confirm `target/package/flowgate-0.2.0.crate` is produced with no warnings about missing metadata (`description`, `license`, `repository`, `readme` all present in `Cargo.toml`). Verify the included file list does not leak anything unintended (no `target/`, no local scratch files). This is the last check before `cargo publish` — which is deliberately left as a manual step outside this plan.
+**Step 28 — Update `README.md`.** ✅
+_Extended:_ Three new fully-worked sections after "OpenAPI Docs":
+- **TLS** — `Cargo.toml` snippet with the `tls` feature, working `from_pem_files` example with `serve(..)`, brief notes on supported key formats and the per-connection-task handshake, and the `cargo run --example tls` smoke test.
+- **Server-Sent Events** — full-stream example using `futures_util::stream::unfold` to produce one `Event` per second with `keep_alive(15s)`, explanation of the `Event` builder + response headers + heartbeat semantics, link to the `body::stream` primitive that backs it.
+- **WebSocket** — `Cargo.toml` snippet with the `ws` feature, full echo handler using `WebSocketUpgrade::on_upgrade`, callout box explaining the `Connection: keep-alive, Upgrade` token-parsing fix, **shutdown carve-out warning** linking to `docs/architecture.md`.
+
+Also updated:
+- Install snippet bumped to `flowgate = "0.2.0"` (was `"0.2"`).
+- "Key Features" list extended with TLS / WebSocket / SSE bullets.
+- Feature-flag table — `ws` and `tls` rows now describe the live functionality (was "(planned)" for both).
+- Project Structure diagram — added `tls.rs`, `sse.rs`, `ws.rs`, `benches/`, `docs/perf-baseline.md`, `docs/plans/`; deleted the stale `openapi_stub.rs` line; added all four new examples.
+- Building & Testing recipe expanded to include `--all-features` test and clippy invocations, the new examples, and `cargo bench`.
+
+**Step 29 — `cargo package` dry-run.** ✅
+_Extended:_ `cargo package --allow-dirty` produces `target/package/flowgate-0.2.0.crate` (85.6 KiB compressed, 48 files) with **zero warnings**. Manifest metadata (`description`, `license`, `repository`, `readme`) all validate. The verification compile of the unpacked crate inside `target/package/flowgate-0.2.0` succeeds. The included file list contains the source tree, examples, benches, README, CHANGELOG, and the architecture / perf-baseline docs — no `target/`, no local scratch files, no agent-instruction files. Added `exclude = ["CLAUDE.md", "AGENTS.md", ".codex", "docs/plans/**"]` to `[package]` to keep the crate slim for consumers (saved 5 files / ~20 KiB compressed vs. the un-excluded build).
+
+### Phase 5 — How to test
+
+```bash
+# Final verification battery before publish
+cargo build --all-features
+cargo test --all-features                                 # 78 tests + 2 doc-tests
+cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo package --allow-dirty                               # produces flowgate-0.2.0.crate
+
+# Inspect the packaged file list
+tar -tzf target/package/flowgate-0.2.0.crate | sort
+```
+
+All green: 78 tests passing, 2 doc-tests passing, zero clippy warnings, zero rustdoc warnings, zero `cargo package` warnings.
+
+### Phase 5 — Summary of changes
+
+**Modified files**
+
+- `Cargo.toml` — `version = "0.2.0"`; added `repository`, `readme`, and `exclude = ["CLAUDE.md", "AGENTS.md", ".codex", "docs/plans/**"]` package metadata
+- `CHANGELOG.md` — `[Unreleased]` block replaced with a comprehensive `## [0.2.0] - 2026-04-19` entry plus a stub `## [0.1.0]` entry; comparison links added
+- `docs/architecture.md` — four new subsections (TLS wiring, streaming response bodies, WebSocket upgrade flow, graceful-shutdown carve-out); dependency table refactored into Required / Feature-gated / Dev-only; layer diagram updated
+- `README.md` — three new feature sections (TLS / SSE / WebSocket) with worked code; install snippet bumped to `0.2.0`; Key Features extended; feature-flag table refreshed; Project Structure expanded to cover all v0.2 modules + examples + benches; Building & Testing recipes expanded
+
+**Generated artifacts (not checked in)**
+
+- `target/package/flowgate-0.2.0.crate` (85.6 KiB compressed, 48 files) — ready for `cargo publish` (executed manually, outside this plan)
+
+### Out-of-plan release steps (manual)
+
+The following are **deliberately not** in this plan and must be performed by hand once the branch merges to `main`:
+
+1. Merge `feature/v0.2` → `main`.
+2. Tag `v0.2.0`, push tag.
+3. `cargo publish` from a clean `main` checkout.
+4. Create a GitHub release referencing the `0.2.0` CHANGELOG entry.
 
 ## Critical Files (for execution reference)
 

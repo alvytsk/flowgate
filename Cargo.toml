@@ -1,10 +1,13 @@
 [package]
 name = "flowgate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A Rust web framework for embedded Linux systems with FastAPI-inspired ergonomics"
 license = "MIT"
+repository = "https://github.com/alvytsk/flowgate"
+readme = "README.md"
+exclude = ["CLAUDE.md", "AGENTS.md", ".codex", "docs/plans/**"]
 
 [features]
 default = ["tracing-fmt"]
