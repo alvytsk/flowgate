@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "flowgate-bench",
+    "axum-bench",
+    "actix-bench",
+    "hyper-bench",
+]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

@@ -7,7 +7,7 @@ description = "A Rust web framework for embedded Linux systems with FastAPI-insp
 license = "MIT"
 repository = "https://github.com/alvytsk/flowgate"
 readme = "README.md"
-exclude = ["CLAUDE.md", "AGENTS.md", ".codex", "docs/plans/**"]
+exclude = ["CLAUDE.md", "AGENTS.md", ".codex", "docs/plans/**", "benchmarks/**"]
 
 [features]
 default = ["tracing-fmt"]
