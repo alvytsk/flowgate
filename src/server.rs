@@ -44,6 +44,14 @@ pub struct ServerHandle {
 impl ServerHandle {
     /// Signal the server to stop accepting new connections and wait for
     /// in-flight connections to complete (with a 30-second drain timeout).
+    ///
+    /// **Upgraded connections (WebSocket) are not tracked.** The task that
+    /// drives an upgraded connection is spawned detached on the tokio runtime
+    /// and survives `shutdown` — the drain timer ignores it. Applications
+    /// that need to close WebSocket sessions cleanly on shutdown should
+    /// broadcast their own shutdown signal via app state (for example a
+    /// `tokio::sync::broadcast::Sender`) and await session closure from
+    /// application code before calling `shutdown`.
     pub async fn shutdown(self) -> std::io::Result<()> {
         let _ = self.shutdown_tx.send(true);
         self.join_handle.await.map_err(std::io::Error::other)
@@ -162,6 +170,14 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
         .max_connections
         .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
+    // Build a TlsAcceptor once if TLS is configured; cloning it per connection
+    // is cheap (it wraps an Arc internally).
+    #[cfg(feature = "tls")]
+    let tls_acceptor: Option<tokio_rustls::TlsAcceptor> = config
+        .tls
+        .as_ref()
+        .map(|t| tokio_rustls::TlsAcceptor::from(t.inner()));
+
     // Shutdown channel: send `true` to signal the accept loop to stop.
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -190,28 +206,41 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
                             let inner = inner.clone();
                             let builder = builder.clone();
                             let active_conns = active_conns.clone();
+                            #[cfg(feature = "tls")]
+                            let tls_acceptor = tls_acceptor.clone();
 
                             tokio::spawn(async move {
                                 let _permit = permit; // released on drop
-                                let io = TokioIo::new(stream);
 
-                                let service = service_fn(move |req: http::Request<Incoming>| {
-                                    let inner = inner.clone();
-                                    async move {
-                                        let response = handle_request(inner, req).await;
-                                        Ok::<_, std::convert::Infallible>(response)
+                                #[cfg(feature = "tls")]
+                                if let Some(acceptor) = tls_acceptor {
+                                    match acceptor.accept(stream).await {
+                                        Ok(tls_stream) => {
+                                            serve_one_connection(
+                                                builder,
+                                                TokioIo::new(tls_stream),
+                                                inner,
+                                                peer_addr,
+                                            )
+                                            .await;
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                "tls handshake failed from {peer_addr}: {err}"
+                                            );
+                                        }
                                     }
-                                });
-
-                                if let Err(err) = builder.serve_connection(io, service).await {
-                                    let msg = err.to_string();
-                                    if msg.contains("timeout") {
-                                        tracing::debug!("connection timeout from {peer_addr}: {err}");
-                                    } else {
-                                        tracing::warn!("connection error from {peer_addr}: {err}");
-                                    }
+                                    active_conns.fetch_sub(1, Ordering::Relaxed);
+                                    return;
                                 }
 
+                                serve_one_connection(
+                                    builder,
+                                    TokioIo::new(stream),
+                                    inner,
+                                    peer_addr,
+                                )
+                                .await;
                                 active_conns.fetch_sub(1, Ordering::Relaxed);
                             });
                         }
@@ -246,6 +275,43 @@ pub async fn serve_with_listener<S: Send + Sync + 'static>(
         join_handle,
         local_addr,
     })
+}
+
+/// Drive a single accepted connection through hyper's HTTP/1 state machine.
+///
+/// Generic over the I/O type so the plain-TCP and TLS paths share one
+/// implementation — both `TokioIo<TcpStream>` and `TokioIo<TlsStream<TcpStream>>`
+/// satisfy the bounds.
+async fn serve_one_connection<S, IO>(
+    builder: hyper::server::conn::http1::Builder,
+    io: IO,
+    inner: Arc<RuntimeInner<S>>,
+    peer_addr: std::net::SocketAddr,
+) where
+    S: Send + Sync + 'static,
+    IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req: http::Request<Incoming>| {
+        let inner = inner.clone();
+        async move {
+            let response = handle_request(inner, req).await;
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    });
+
+    // `.with_upgrades()` is required for HTTP Upgrade (e.g. WebSocket) to
+    // actually hand the socket off to the application — without it the
+    // 101 response is written but the connection is torn down before the
+    // spawned upgrade task can consume the raw socket.
+    let conn = builder.serve_connection(io, service).with_upgrades();
+    if let Err(err) = conn.await {
+        let msg = err.to_string();
+        if msg.contains("timeout") {
+            tracing::debug!("connection timeout from {peer_addr}: {err}");
+        } else {
+            tracing::warn!("connection error from {peer_addr}: {err}");
+        }
+    }
 }
 
 /// Entry point for request handling — runs pre-middleware then dispatch.

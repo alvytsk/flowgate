@@ -27,12 +27,16 @@ pub(crate) struct RawRoute<S> {
 /// Application-level metadata — used for startup banner and OpenAPI info.
 #[derive(Clone, Debug, Default)]
 pub struct AppMeta {
+    /// Application title (e.g., "My API").
     pub title: String,
+    /// Application version (e.g., "1.0.0").
     pub version: String,
+    /// Optional longer description for the OpenAPI `info` section.
     pub description: Option<String>,
 }
 
 impl AppMeta {
+    /// Create new app metadata with the given title and version.
     pub fn new(title: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -41,6 +45,7 @@ impl AppMeta {
         }
     }
 
+    /// Set the description field and return the builder.
     pub fn description(mut self, desc: impl Into<String>) -> Self {
         self.description = Some(desc.into());
         self

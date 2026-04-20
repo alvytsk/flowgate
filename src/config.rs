@@ -27,6 +27,9 @@ pub struct ServerConfig {
     pub max_connections: Option<usize>,
     /// Enable the default tracing subscriber. Default: true.
     pub enable_default_tracing: bool,
+    /// TLS configuration. `None` serves plain HTTP.
+    #[cfg(feature = "tls")]
+    pub tls: Option<crate::tls::TlsConfig>,
 }
 
 impl Default for ServerConfig {
@@ -41,6 +44,8 @@ impl Default for ServerConfig {
             max_headers: Some(64),
             max_connections: None,
             enable_default_tracing: true,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 }
@@ -128,6 +133,13 @@ impl ServerConfig {
 
     pub fn enable_default_tracing(mut self, enable: bool) -> Self {
         self.enable_default_tracing = enable;
+        self
+    }
+
+    /// Enable TLS with the given configuration.
+    #[cfg(feature = "tls")]
+    pub fn tls(mut self, tls: crate::tls::TlsConfig) -> Self {
+        self.tls = Some(tls);
         self
     }
 }

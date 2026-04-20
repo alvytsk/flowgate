@@ -36,5 +36,7 @@ pub struct RequestEvent<'a> {
 /// synchronously on the hot path. For any I/O (pushing to a remote backend,
 /// writing to a file), hand the event off to a background task via a channel.
 pub trait MetricsObserver: Send + Sync {
+    /// Called once per request after the response is produced. Must be
+    /// non-blocking; hand off any I/O to a background task.
     fn on_request(&self, event: &RequestEvent<'_>);
 }

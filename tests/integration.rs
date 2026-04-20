@@ -1702,3 +1702,310 @@ async fn round_trip_graceful_shutdown() {
     // Shut down and verify it completes.
     handle.shutdown().await.unwrap();
 }
+
+// --- TLS tests ---
+
+#[cfg(feature = "tls")]
+mod tls_tests {
+    use super::*;
+    use flowgate::TlsConfig;
+    use http_body_util::Empty;
+    use hyper_util::rt::TokioIo;
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+    use std::io::Write;
+    use std::sync::Arc;
+    use tokio_rustls::TlsConnector;
+
+    struct GeneratedCert {
+        cert_der: CertificateDer<'static>,
+        tls_config: TlsConfig,
+    }
+
+    fn gen_self_signed_tls() -> GeneratedCert {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let rustls_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der.into())
+            .unwrap();
+        GeneratedCert {
+            cert_der,
+            tls_config: TlsConfig::from_rustls(Arc::new(rustls_cfg)),
+        }
+    }
+
+    fn build_client(trusted: CertificateDer<'static>) -> TlsConnector {
+        let mut roots = RootCertStore::empty();
+        roots.add(trusted).unwrap();
+        let client_cfg = RustlsClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        TlsConnector::from(Arc::new(client_cfg))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tls_round_trip_https() {
+        async fn hello() -> &'static str {
+            "secure hello"
+        }
+
+        let generated = gen_self_signed_tls();
+        let app = App::new().get("/", hello).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = ServerConfig::new()
+            .enable_default_tracing(false)
+            .tls(generated.tls_config);
+        let _handle = flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
+
+        let connector = build_client(generated.cert_der);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let domain = ServerName::try_from("localhost").unwrap();
+        let tls_stream = connector.connect(domain, tcp).await.unwrap();
+
+        let io = TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body_bytes[..], b"secure hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tls_from_pem_files_round_trip() {
+        async fn hello() -> &'static str {
+            "pem hello"
+        }
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert_pem.as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file.write_all(key_pem.as_bytes()).unwrap();
+
+        let tls = TlsConfig::from_pem_files(cert_file.path(), key_file.path()).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = ServerConfig::new().enable_default_tracing(false).tls(tls);
+        let app = App::new().get("/", hello).unwrap();
+        let _handle = flowgate::server::serve_with_listener(app, config, listener)
+            .await
+            .unwrap();
+
+        let connector = build_client(cert.cert.der().clone());
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let domain = ServerName::try_from("localhost").unwrap();
+        let tls_stream = connector.connect(domain, tcp).await.unwrap();
+
+        let io = TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+}
+
+// --- SSE tests ---
+
+mod sse_tests {
+    use super::*;
+    use flowgate::sse::{Event, Sse};
+    use futures_core::Stream;
+    use futures_util::stream;
+    use http_body_util::Empty;
+    use hyper_util::rt::TokioIo;
+    use std::time::Duration;
+
+    async fn three_events() -> Sse<impl Stream<Item = Event>> {
+        let events = stream::iter([
+            Event::default().data("one"),
+            Event::default().data("two"),
+            Event::default().data("three"),
+        ]);
+        Sse::new(events)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sse_stream_emits_events() {
+        let app = App::new().get("/events", three_events).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/events")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(
+            res.headers().get(http::header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+        assert_eq!(res.headers().get("x-accel-buffering").unwrap(), "no");
+
+        let body_bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+        assert_eq!(body, "data: one\n\ndata: two\n\ndata: three\n\n");
+    }
+
+    async fn pending_with_heartbeat() -> Sse<impl Stream<Item = Event>> {
+        // Stream that never yields an event — only heartbeat frames drive the body.
+        let never: stream::Pending<Event> = stream::pending();
+        Sse::new(never).keep_alive(Duration::from_millis(30))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sse_heartbeat_frames_are_emitted() {
+        let app = App::new().get("/events", pending_with_heartbeat).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/events")
+            .header("host", "localhost")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let mut body = res.into_body();
+        let read = tokio::time::timeout(Duration::from_secs(2), async {
+            let frame = body.frame().await.unwrap().unwrap();
+            frame.into_data().ok().unwrap()
+        })
+        .await
+        .expect("heartbeat did not arrive within 2s");
+
+        assert_eq!(&read[..], b":\n\n");
+    }
+}
+
+// --- WebSocket tests ---
+
+#[cfg(feature = "ws")]
+mod ws_tests {
+    use super::*;
+    use flowgate::body::Response;
+    use flowgate::ws::{Message, WebSocketUpgrade};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::client_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    async fn echo(upgrade: WebSocketUpgrade) -> Response {
+        upgrade.on_upgrade(|mut socket| async move {
+            while let Some(Ok(msg)) = socket.recv().await {
+                if msg.is_close() {
+                    break;
+                }
+                if socket.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_echo_round_trip() {
+        let app = App::new().get("/ws", echo).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let url = format!("ws://{addr}/ws");
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let request = url.into_client_request().unwrap();
+        let (mut ws_stream, _response) = client_async(request, stream).await.unwrap();
+
+        ws_stream.send(Message::Text("hello".into())).await.unwrap();
+
+        let echoed = ws_stream.next().await.unwrap().unwrap();
+        match echoed {
+            Message::Text(text) => assert_eq!(text.as_str(), "hello"),
+            other => panic!("expected text message, got {other:?}"),
+        }
+    }
+
+    /// Regression test for naive string-equality header checking.
+    /// A spec-compliant `Connection: keep-alive, Upgrade` must succeed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_accepts_compound_connection_header() {
+        let app = App::new().get("/ws", echo).unwrap();
+        let (addr, _handle) = serve_app(app).await;
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Raw HTTP/1.1 upgrade request with a compound Connection header.
+        let req = b"GET /ws HTTP/1.1\r\n\
+            Host: localhost\r\n\
+            Connection: keep-alive, Upgrade\r\n\
+            Upgrade: websocket\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            \r\n";
+        stream.write_all(req).await.unwrap();
+
+        // Read just the status line and first header batch.
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        let resp = std::str::from_utf8(&buf[..n]).unwrap();
+
+        assert!(
+            resp.starts_with("HTTP/1.1 101 Switching Protocols"),
+            "expected 101 response, got:\n{resp}"
+        );
+        // Expected Sec-WebSocket-Accept for the canonical example key.
+        assert!(
+            resp.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+            "expected canonical Sec-WebSocket-Accept header; got:\n{resp}"
+        );
+    }
+}

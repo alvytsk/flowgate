@@ -13,8 +13,12 @@ use crate::response::IntoResponse;
 
 /// Extract a type from request headers/metadata (does not consume the body).
 pub trait FromRequestParts<S>: Sized {
+    /// Type returned when extraction fails. Converted into a response via
+    /// [`IntoResponse`].
     type Rejection: IntoResponse;
 
+    /// Extract `Self` from the request parts. Called by the handler machinery
+    /// for every extractor argument except the last.
     fn from_request_parts(
         parts: &mut Parts,
         state: &S,
@@ -23,8 +27,12 @@ pub trait FromRequestParts<S>: Sized {
 
 /// Extract a type from the full request (may consume the body).
 pub trait FromRequest<S>: Sized {
+    /// Type returned when extraction fails. Converted into a response via
+    /// [`IntoResponse`].
     type Rejection: IntoResponse;
 
+    /// Extract `Self` from the full request. Called by the handler machinery
+    /// for the last extractor argument (which is allowed to consume the body).
     fn from_request(
         req: Request,
         state: &S,
@@ -33,6 +41,7 @@ pub trait FromRequest<S>: Sized {
 
 /// Project a sub-state `T` from the application state `S`.
 pub trait FromRef<S> {
+    /// Project `Self` out of the full application state.
     fn from_ref(state: &S) -> Self;
 }
 

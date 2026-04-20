@@ -16,6 +16,8 @@ use crate::handler::{BoxFuture, Endpoint};
 /// Does not have access to route params or the matched endpoint.
 /// Can short-circuit by returning a Response instead of calling `next`.
 pub trait PreMiddleware<S>: Send + Sync + 'static {
+    /// Invoke the middleware. Return the response from `next.run(..)` to
+    /// continue the chain, or produce a `Response` directly to short-circuit.
     fn call(&self, req: Request, state: Arc<S>, next: PreNext<S>) -> BoxFuture;
 }
 
@@ -52,6 +54,8 @@ impl<S: Send + Sync + 'static> PreNext<S> {
 
 /// Middleware trait — processes requests before they reach the handler.
 pub trait Middleware<S>: Send + Sync + 'static {
+    /// Invoke the middleware. Return the response from `next.run(..)` to
+    /// continue the chain, or produce a `Response` directly to short-circuit.
     fn call(&self, req: Request, state: Arc<S>, next: Next<S>) -> BoxFuture;
 }
 

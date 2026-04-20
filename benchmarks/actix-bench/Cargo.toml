@@ -1,0 +1,13 @@
+[package]
+name = "actix-bench"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "actix-bench"
+path = "src/main.rs"
+
+[dependencies]
+actix-web = "4"
+serde = { version = "1.0", features = ["derive"] }

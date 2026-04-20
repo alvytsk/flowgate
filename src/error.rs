@@ -2,6 +2,10 @@ use crate::body::Response;
 use crate::response::IntoResponse;
 use http::StatusCode;
 
+/// Type-erased error used by streaming bodies and other points where the
+/// concrete error type isn't exposed through the public API.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Rejection returned when JSON extraction fails.
 #[derive(Debug)]
 pub enum JsonRejection {

@@ -40,6 +40,9 @@ In an ecosystem of heavyweight async frameworks, Flowgate is purpose-built for *
 - **Pre- and Post-routing Middleware**: `PreMiddleware` runs before route matching (request IDs, auth shortcuts). `Middleware` runs after (tracing, timeouts, panic recovery).
 - **Built-in Operational Middleware**: `RequestIdMiddleware`, `TimeoutMiddleware`, `RecoverMiddleware` (feature-gated) -- production-ready out of the box.
 - **OpenAPI + Docs UI**: Feature-gated spec generation and Scalar docs UI at `/docs`. Manual operation metadata, no proc-macro overhead.
+- **TLS via rustls** (`tls` feature): HTTPS with `from_pem_files` or a pre-built `rustls::ServerConfig`. ALPN pinned to `http/1.1`, handshake runs inside the per-connection task so it never stalls accept.
+- **WebSocket** (`ws` feature): `WebSocketUpgrade` extractor with token-aware header parsing (`Connection: keep-alive, Upgrade` works) and detached upgrade tasks.
+- **Server-Sent Events**: `Sse<S: Stream<Item = Event>>` responder with optional keep-alive heartbeats, backed by a general-purpose `body::stream(...)` primitive.
 - **Order-Insensitive Builder**: Routes, groups, and middleware can be added in any order. `finalize()` merges everything correctly at serve time.
 - **Single Crate**: One dependency in your `Cargo.toml`. No workspace sprawl, no adapter crates, no version matrix.
 - **Zero-Allocation Router**: Built on [matchit](https://github.com/ibraheemdev/matchit) -- a radix trie with path parameters and zero heap allocations on match.
@@ -52,7 +55,7 @@ In an ecosystem of heavyweight async frameworks, Flowgate is purpose-built for *
 
 ```toml
 [dependencies]
-flowgate = "0.2"
+flowgate = "0.2.0"
 serde = { version = "1.0", features = ["derive"] }
 ```
 
@@ -313,6 +316,132 @@ When the `openapi` feature is disabled, `OperationMeta` becomes a zero-size stub
 
 ---
 
+## TLS
+
+Enable the `tls` feature to serve HTTPS. ALPN advertises only `http/1.1` (HTTP/2 is an explicit non-goal for v0.2).
+
+```toml
+[dependencies]
+flowgate = { version = "0.2.0", features = ["tls"] }
+```
+
+```rust
+use flowgate::{App, ServerConfig, TlsConfig};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tls = TlsConfig::from_pem_files("cert.pem", "key.pem")?;
+    let config = ServerConfig::new().port(8443).tls(tls);
+    let app = App::new().get("/", || async { "hello over TLS!" })?;
+    flowgate::server::serve(app, config).await?;
+    Ok(())
+}
+```
+
+`from_pem_files` accepts PKCS#8, RSA (PKCS#1), and SEC1 (EC) private keys. For ACME or in-memory certificates, use `TlsConfig::from_rustls(Arc<rustls::ServerConfig>)` -- ALPN is forcibly overwritten to `["http/1.1"]` regardless of what the caller set.
+
+The TLS handshake runs **inside the per-connection task**, never the accept task -- slow handshakes cannot stall `accept()`. Handshake failures are logged at `warn!` and drop the single connection; the server keeps running.
+
+```bash
+cargo run --example tls --features tls
+# (in another terminal)
+curl -k https://localhost:8443/
+```
+
+---
+
+## Server-Sent Events
+
+`Sse<S: Stream<Item = Event>>` is a responder that streams events to the client. Always available -- no feature gate.
+
+```rust
+use std::time::Duration;
+use flowgate::{App, ServerConfig};
+use flowgate::sse::{Event, Sse};
+use futures_util::stream;
+
+async fn events() -> Sse<impl futures_core::Stream<Item = Event>> {
+    let s = stream::unfold(0u64, |n| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let event = Event::default()
+            .id(n.to_string())
+            .data(format!("tick {n}"));
+        Some((event, n + 1))
+    });
+    Sse::new(s).keep_alive(Duration::from_secs(15))
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app = App::new().get("/events", events)?;
+    flowgate::server::serve(app, ServerConfig::from_env()).await?;
+    Ok(())
+}
+```
+
+`Event` builders cover all four wire fields: `data`, `event`, `id`, `retry(Duration)`. The `IntoResponse` impl sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` (the last for nginx-style buffering proxies).
+
+`keep_alive(Duration)` interleaves `:\n\n` SSE comment frames at the configured interval. Comment frames are invisible to clients per the spec but keep the socket warm so intermediaries do not drop idle streams.
+
+`Sse` is built on a general-purpose `body::stream<S, E>(s) -> ResponseBody` helper -- the same primitive is available for any other streaming-body use case.
+
+```bash
+cargo run --example sse
+# (in another terminal)
+curl -N http://localhost:8080/events
+```
+
+---
+
+## WebSocket
+
+Enable the `ws` feature for WebSocket support. `WebSocketUpgrade` is a dual extractor (`FromRequestParts` and `FromRequest`) so it can sit alone or alongside other handler arguments.
+
+```toml
+[dependencies]
+flowgate = { version = "0.2.0", features = ["ws"] }
+```
+
+```rust
+use flowgate::{App, ServerConfig, IntoResponse, Message, WebSocketUpgrade};
+
+async fn echo(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(|mut socket| async move {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) { break; }
+            if socket.send(msg).await.is_err() { break; }
+        }
+    })
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app = App::new().get("/ws", echo)?;
+    flowgate::server::serve(app, ServerConfig::from_env()).await?;
+    Ok(())
+}
+```
+
+Header parsing is **token-aware and case-insensitive**. Real-world clients send `Connection: keep-alive, Upgrade` -- a naive string-equality check would silently reject them. Flowgate parses comma-separated tokens correctly.
+
+`on_upgrade(callback)` returns a `101 Switching Protocols` response **and** detached-spawns a task that:
+
+1. Awaits hyper's `OnUpgrade` future.
+2. Wraps the upgraded stream with `tokio_tungstenite::WebSocketStream::from_raw_socket(.., Role::Server, None)`.
+3. Invokes your callback with a `WebSocket`.
+
+`WebSocket` exposes `recv() -> Option<Result<Message, WsError>>`, `send(Message) -> Result<..>`, and `close() -> Result<..>`. `Message` is re-exported from `tokio-tungstenite`.
+
+> **Shutdown carve-out:** Upgraded WebSocket tasks survive `ServerHandle::shutdown()` and are not included in the 30-second drain timer. If you need coordinated session closure, keep a `tokio::sync::broadcast::Sender` in app state and signal it before initiating shutdown. See [docs/architecture.md](docs/architecture.md#graceful-shutdown-and-upgraded-connections) for the rationale.
+
+```bash
+cargo run --example ws_echo --features ws
+# (in another terminal, with websocat installed)
+websocat ws://localhost:8080/ws
+```
+
+---
+
 ## Server Configuration
 
 Read from environment or configure explicitly -- embedded-safe defaults out of the box.
@@ -355,11 +484,11 @@ let config = ServerConfig::new()
 | Flag | Default | Description |
 | :--- | :---: | :--- |
 | `tracing-fmt` | yes | Sets up `tracing-subscriber` with env-filter |
-| `openapi` | -- | OpenAPI 3.1 spec generation + Scalar docs UI |
+| `openapi` | -- | OpenAPI 3.1 spec generation + Scalar docs UI at `/docs` |
 | `recover` | -- | `RecoverMiddleware` for panic recovery |
 | `multi-thread` | -- | Enables tokio multi-threaded runtime |
-| `ws` | -- | WebSocket support (planned) |
-| `tls` | -- | TLS via rustls (planned) |
+| `ws` | -- | WebSocket via `tokio-tungstenite` (`WebSocketUpgrade`, `Message`) |
+| `tls` | -- | TLS via `rustls` (`TlsConfig::from_pem_files`, `from_rustls`) |
 
 ```bash
 cargo build --all-features
@@ -370,13 +499,18 @@ cargo build --all-features
 ## Building & Testing
 
 ```bash
-cargo build                           # Build the library
-cargo test                            # Run all tests
-cargo test --features openapi         # Include OpenAPI tests
-cargo clippy --all-targets            # Lint (zero warnings required)
-cargo doc --no-deps --open            # Browse API docs
-cargo run --example hello             # Run minimal demo on :8080
-cargo run --example groups --features openapi  # Groups demo with OpenAPI docs
+cargo build                                      # Build the library
+cargo build --all-features                       # ws + tls + multi-thread + recover + openapi
+cargo test                                       # Run all tests
+cargo test --all-features                        # Include TLS, WS, SSE, OpenAPI tests
+cargo clippy --all-targets --all-features -- -D warnings  # Lint (zero warnings required)
+cargo doc --no-deps --all-features --open        # Browse API docs
+cargo run --example hello                        # Minimal demo on :8080
+cargo run --example groups --features openapi    # Groups + OpenAPI docs at /docs
+cargo run --example sse                          # SSE counter at /events
+cargo run --example tls --features tls           # HTTPS on :8443 with self-signed cert
+cargo run --example ws_echo --features ws        # WebSocket echo at /ws
+cargo bench                                      # Criterion benchmarks
 ```
 
 ---
@@ -387,16 +521,19 @@ cargo run --example groups --features openapi  # Groups demo with OpenAPI docs
 src/
   lib.rs              Public API re-exports
   app.rs              App builder, RawRoute, finalize(), AppMeta
-  server.rs           TCP accept loop, hyper wiring, startup banner
+  server.rs           TCP accept loop, hyper wiring, startup banner, TLS branch
   router.rs           matchit radix trie, CompiledRoute
   handler.rs          Handler trait + macro-generated impls (0-8 args)
   group.rs            Route group builder, flatten, path normalization
   config.rs           ServerConfig with embedded-safe defaults
-  body.rs             Request/Response type aliases
+  body.rs             Request/Response type aliases, body::stream/full/empty
   context.rs          RequestContext, RouteParams (injected per-request)
-  error.rs            Rejection types implementing IntoResponse
+  error.rs            Rejection types, BoxError type alias
   observer.rs         MetricsObserver trait + RequestEvent
   response.rs         IntoResponse trait + impls
+  sse.rs              Sse<S>, Event builder, SSE keep-alive heartbeat
+  tls.rs              TlsConfig, TlsError, PEM loader (tls feature)
+  ws.rs               WebSocketUpgrade, WebSocket, Message (ws feature)
   extract/
     mod.rs            FromRequest, FromRequestParts, FromRef traits
     json.rs           Json<T> extractor/responder
@@ -409,19 +546,25 @@ src/
     request_id.rs     RequestIdMiddleware
     timeout.rs        TimeoutMiddleware
     recover.rs        RecoverMiddleware (feature-gated)
-  openapi/            (feature-gated)
-    mod.rs            Module re-exports
+  openapi/            (feature-gated; mod.rs holds the no-feature stub too)
+    mod.rs            Cfg-gated re-exports + zero-size OperationMeta stub
     meta.rs           OperationMeta, ParamMeta, SchemaObject
     spec.rs           OpenAPI 3.1 spec generation
     ui.rs             Scalar docs UI HTML
-  openapi_stub.rs     Zero-size OperationMeta stub (when openapi off)
 examples/
   hello.rs            Minimal demo with state and middleware
   groups.rs           Route groups, request IDs, nested middleware (requires openapi feature)
+  tls.rs              HTTPS with self-signed cert (requires tls feature)
+  sse.rs              SSE counter endpoint with keep-alive
+  ws_echo.rs          WebSocket echo server (requires ws feature)
+benches/
+  dispatch.rs         Criterion suite — router, middleware, JSON, OpenAPI, 404
 tests/
-  integration.rs      Round-trip HTTP tests
+  integration.rs      Round-trip HTTP, TLS, SSE, WS tests
 docs/
-  architecture.md     Layer diagram, builder/runtime split, design decisions
+  architecture.md     Layer diagram, TLS / streaming / WS upgrade flow, dependencies
+  perf-baseline.md    Benchmark methodology + reference matrix
+  plans/              Per-release implementation plans
 ```
 
 ---

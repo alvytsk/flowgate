@@ -11,19 +11,22 @@ pub mod observer;
 pub mod response;
 pub mod router;
 pub mod server;
+pub mod sse;
 
-#[cfg(feature = "openapi")]
+#[cfg(feature = "tls")]
+pub mod tls;
+
+#[cfg(feature = "ws")]
+pub mod ws;
+
 pub mod openapi;
-
-#[cfg(not(feature = "openapi"))]
-pub mod openapi_stub;
 
 // Re-exports for ergonomic use
 pub use app::{App, AppMeta};
 pub use body::{Request, Response};
 pub use config::ServerConfig;
 pub use context::{RequestContext, RouteParams};
-pub use error::RouteError;
+pub use error::{BoxError, RouteError};
 pub use extract::json::Json;
 pub use extract::path::Path;
 pub use extract::query::Query;
@@ -40,9 +43,16 @@ pub use middleware::PreMiddleware;
 pub use observer::{MetricsObserver, RequestEvent};
 pub use response::IntoResponse;
 pub use server::ServerHandle;
+pub use sse::{Event, Sse};
+#[cfg(feature = "tls")]
+pub use tls::{TlsConfig, TlsError};
+#[cfg(feature = "ws")]
+pub use ws::{Message, WebSocket, WebSocketUpgrade, WsError};
 
 // OperationMeta: real type when openapi feature is on, zero-size stub when off.
-#[cfg(feature = "openapi")]
-pub use openapi::meta::OperationMeta;
-#[cfg(not(feature = "openapi"))]
-pub use openapi_stub::OperationMeta;
+pub use openapi::OperationMeta;
+
+// Ergonomic re-exports from common upstream crates so users don't need parallel
+// `http` / `bytes` imports in their `Cargo.toml`.
+pub use bytes::Bytes;
+pub use http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
