@@ -27,8 +27,6 @@ pub use body::{Request, Response};
 pub use config::ServerConfig;
 pub use context::{RequestContext, RouteParams};
 pub use error::{BoxError, RouteError};
-#[cfg(feature = "tls")]
-pub use tls::{TlsConfig, TlsError};
 pub use extract::json::Json;
 pub use extract::path::Path;
 pub use extract::query::Query;
@@ -46,6 +44,8 @@ pub use observer::{MetricsObserver, RequestEvent};
 pub use response::IntoResponse;
 pub use server::ServerHandle;
 pub use sse::{Event, Sse};
+#[cfg(feature = "tls")]
+pub use tls::{TlsConfig, TlsError};
 #[cfg(feature = "ws")]
 pub use ws::{Message, WebSocket, WebSocketUpgrade, WsError};
 

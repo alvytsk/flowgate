@@ -17,7 +17,10 @@ use flowgate::{App, ServerConfig};
 async fn events() -> Sse<impl futures_core::Stream<Item = Event>> {
     let ticker = stream::unfold(0u64, |n| async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        Some((Event::default().id(n.to_string()).data(format!("tick {n}")), n + 1))
+        Some((
+            Event::default().id(n.to_string()).data(format!("tick {n}")),
+            n + 1,
+        ))
     });
     Sse::new(ticker.boxed()).keep_alive(Duration::from_secs(15))
 }

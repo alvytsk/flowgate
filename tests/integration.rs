@@ -1725,8 +1725,7 @@ mod tls_tests {
     fn gen_self_signed_tls() -> GeneratedCert {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         let cert_der = cert.cert.der().clone();
-        let key_der =
-            PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
         let rustls_cfg = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(vec![cert_der.clone()], key_der.into())
@@ -1770,10 +1769,9 @@ mod tls_tests {
         let tls_stream = connector.connect(domain, tcp).await.unwrap();
 
         let io = TokioIo::new(tls_stream);
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-                .await
-                .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
         tokio::spawn(conn);
 
         let req = http::Request::builder()
@@ -1819,10 +1817,9 @@ mod tls_tests {
         let tls_stream = connector.connect(domain, tcp).await.unwrap();
 
         let io = TokioIo::new(tls_stream);
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-                .await
-                .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
         tokio::spawn(conn);
 
         let req = http::Request::builder()
@@ -1863,10 +1860,9 @@ mod sse_tests {
 
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let io = TokioIo::new(stream);
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-                .await
-                .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
         tokio::spawn(conn);
 
         let req = http::Request::builder()
@@ -1906,10 +1902,9 @@ mod sse_tests {
 
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let io = TokioIo::new(stream);
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
-                .await
-                .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(io)
+            .await
+            .unwrap();
         tokio::spawn(conn);
 
         let req = http::Request::builder()
@@ -1970,10 +1965,7 @@ mod ws_tests {
         let request = url.into_client_request().unwrap();
         let (mut ws_stream, _response) = client_async(request, stream).await.unwrap();
 
-        ws_stream
-            .send(Message::Text("hello".into()))
-            .await
-            .unwrap();
+        ws_stream.send(Message::Text("hello".into())).await.unwrap();
 
         let echoed = ws_stream.next().await.unwrap().unwrap();
         match echoed {

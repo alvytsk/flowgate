@@ -139,8 +139,7 @@ impl WebSocketUpgrade {
             match on_upgrade.await {
                 Ok(upgraded) => {
                     let io = TokioIo::new(upgraded);
-                    let ws_stream =
-                        WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+                    let ws_stream = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
                     callback(WebSocket { inner: ws_stream }).await;
                 }
                 Err(err) => {
@@ -152,7 +151,10 @@ impl WebSocketUpgrade {
         http::Response::builder()
             .status(StatusCode::SWITCHING_PROTOCOLS)
             .header(http::header::UPGRADE, HeaderValue::from_static("websocket"))
-            .header(http::header::CONNECTION, HeaderValue::from_static("upgrade"))
+            .header(
+                http::header::CONNECTION,
+                HeaderValue::from_static("upgrade"),
+            )
             .header(http::header::SEC_WEBSOCKET_ACCEPT, sec_accept)
             .body(empty())
             .expect("101 response is always well-formed")
@@ -272,7 +274,10 @@ mod tests {
     #[test]
     fn header_contains_token_simple() {
         let mut headers = HeaderMap::new();
-        headers.insert(http::header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.insert(
+            http::header::CONNECTION,
+            HeaderValue::from_static("Upgrade"),
+        );
         assert!(header_contains_token(
             &headers,
             &http::header::CONNECTION,

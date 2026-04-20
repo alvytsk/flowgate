@@ -31,7 +31,10 @@ async fn hello(State(state): State<AppState>) -> String {
 }
 
 fn load_tls() -> Result<TlsConfig, Box<dyn std::error::Error>> {
-    match (std::env::var("FLOWGATE_CERT"), std::env::var("FLOWGATE_KEY")) {
+    match (
+        std::env::var("FLOWGATE_CERT"),
+        std::env::var("FLOWGATE_KEY"),
+    ) {
         (Ok(cert), Ok(key)) => {
             println!("loading TLS from files: cert={cert} key={key}");
             Ok(TlsConfig::from_pem_files(cert, key)?)
@@ -40,7 +43,8 @@ fn load_tls() -> Result<TlsConfig, Box<dyn std::error::Error>> {
             println!("generating self-signed cert in memory (set FLOWGATE_CERT/FLOWGATE_KEY to use a file)");
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
             let cert_der = cert.cert.der().clone();
-            let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+            let key_der =
+                rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
             let rustls_cfg = RustlsServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(vec![cert_der], key_der.into())?;

@@ -214,10 +214,7 @@ fn heartbeat_stream(interval: Duration) -> impl Stream<Item = Result<Bytes, Infa
     impl Stream for Heartbeat {
         type Item = Result<Bytes, Infallible>;
 
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             match self.interval.poll_tick(cx) {
                 Poll::Ready(_) => Poll::Ready(Some(Ok(Bytes::from_static(b":\n\n")))),
                 Poll::Pending => Poll::Pending,

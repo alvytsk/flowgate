@@ -169,8 +169,7 @@ mod tests {
     #[test]
     fn from_pem_files_forces_http1_alpn() {
         let (cert_file, key_file) = generate_self_signed_pem();
-        let tls =
-            TlsConfig::from_pem_files(cert_file.path(), key_file.path()).expect("load pem");
+        let tls = TlsConfig::from_pem_files(cert_file.path(), key_file.path()).expect("load pem");
         assert_eq!(tls.alpn_protocols(), &[b"http/1.1".to_vec()]);
     }
 
